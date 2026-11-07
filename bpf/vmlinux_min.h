@@ -45,4 +45,8 @@ struct trace_event_raw_block_rq_completion___local {
     int error;
 } __attribute__((preserve_access_index));
 
+struct bpf_raw_tracepoint_args {
+    __u64 args[0];
+};
+
 #endif

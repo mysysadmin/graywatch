@@ -58,8 +58,8 @@ int BPF_PROG(account_start, struct request___local *request) {
     return 0;
 }
 
-SEC("fentry/blk_mq_complete_request")
-int BPF_PROG(account_done, struct request___local *request) {
+static __always_inline int complete_request(struct request___local *request,
+                                            __u8 error) {
     const __u64 pointer = (__u64)request;
     const struct request_start *start = bpf_map_lookup_elem(&starts, &pointer);
     if (!start) return 0;
@@ -74,19 +74,15 @@ int BPF_PROG(account_done, struct request___local *request) {
         __sync_fetch_and_add(&stats->bytes, start->bytes);
         __sync_fetch_and_add(&stats->total_latency_ns, latency_ns);
         __sync_fetch_and_add(&stats->buckets[bucket], 1);
+        if (error) __sync_fetch_and_add(&stats->errors, 1);
     }
     bpf_map_delete_elem(&starts, &pointer);
     return 0;
 }
 
-SEC("tp/block/block_rq_error")
-int account_error(struct trace_event_raw_block_rq_completion___local *context) {
-    const struct io_key key = {
-        .dev = BPF_CORE_READ(context, dev),
-        .operation = 0xffffffff,
-    };
-    struct io_stats *stats = get_stats((struct io_key *)&key);
-    if (stats) __sync_fetch_and_add(&stats->errors, 1);
-    return 0;
+SEC("raw_tp/block_rq_complete")
+int account_done(struct bpf_raw_tracepoint_args *context) {
+    return complete_request((struct request___local *)context->args[0],
+                            (__u8)context->args[1]);
 }
 
