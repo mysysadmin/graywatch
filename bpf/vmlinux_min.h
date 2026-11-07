@@ -13,6 +13,15 @@ typedef __u32 __wsum;
 
 typedef __u32 dev_t;
 
+enum {
+    BPF_MAP_TYPE_HASH = 1,
+};
+
+enum {
+    BPF_ANY = 0,
+    BPF_NOEXIST = 1,
+};
+
 struct gendisk___local {
     int major;
     int first_minor;
