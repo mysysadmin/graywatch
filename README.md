@@ -74,6 +74,18 @@ filtered directly by PID or UID, and Graywatch does not infer per-process I/O or
 memory stalls from CPU scheduling counters. Those require separate accounting
 or eBPF collectors.
 
+Each `tasks` interval also includes system-wide CPU pressure from PSI:
+
+```text
+SYSTEM_CPU condition=PRESSURE severity=0.50 some_stall_percent=50.00 \
+  full_stall_percent=0.00 selected_active_threads=2 selected_waiting_threads=2
+```
+
+`severity` is the fraction of wall time in which at least one system task was
+waiting for CPU; it is not based on a learned baseline. The selected thread
+counts answer whether the requested PID or user was affected. Per-thread wait
+times are not summed into PSI because several threads can wait simultaneously.
+
 Example output:
 
 ```text

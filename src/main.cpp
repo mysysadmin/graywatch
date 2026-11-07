@@ -2,6 +2,7 @@
 #include "graywatch/psi.hpp"
 #include "graywatch/task_stats.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <iomanip>
@@ -205,6 +206,8 @@ std::vector<graywatch::TaskSample> read_selected_tasks(const TaskOptions& option
 
 void tasks(const TaskOptions& options) {
     auto previous = read_selected_tasks(options);
+    auto previous_psi = graywatch::read_system_psi();
+    auto previous_time = std::chrono::steady_clock::now();
     if (previous.empty()) {
         throw std::runtime_error("no readable tasks matched the selection");
     }
@@ -212,8 +215,44 @@ void tasks(const TaskOptions& options) {
     const auto sleep_duration = std::chrono::duration<double>(options.interval_seconds);
     while (options.count == 0 || emitted < options.count) {
         std::this_thread::sleep_for(sleep_duration);
+        const auto current_time = std::chrono::steady_clock::now();
         const auto current = read_selected_tasks(options);
         const auto intervals = graywatch::calculate_task_intervals(previous, current);
+        const auto current_psi = graywatch::read_system_psi();
+        const double elapsed = std::chrono::duration<double>(
+                                   current_time - previous_time)
+                                   .count();
+        const auto pressure = graywatch::calculate_psi_intervals(
+            previous_psi, current_psi, elapsed);
+
+        double cpu_some_percent{};
+        double cpu_full_percent{};
+        std::uint64_t cpu_some_us{};
+        for (const auto& interval : pressure) {
+            if (interval.resource == "cpu" && interval.scope == "some") {
+                cpu_some_percent = interval.stall_percent;
+                cpu_some_us = interval.stalled_us;
+            } else if (interval.resource == "cpu" && interval.scope == "full") {
+                cpu_full_percent = interval.stall_percent;
+            }
+        }
+
+        const auto active_threads = std::count_if(
+            intervals.begin(), intervals.end(), [](const auto& interval) {
+                return interval.runtime_ns != 0 || interval.runqueue_wait_ns != 0;
+            });
+        const auto waiting_threads = std::count_if(
+            intervals.begin(), intervals.end(), [](const auto& interval) {
+                return interval.runqueue_wait_ns != 0;
+            });
+
+        std::cout << "SYSTEM_CPU condition="
+                  << (cpu_some_us == 0 ? "NO_PRESSURE" : "PRESSURE")
+                  << " severity=" << std::clamp(cpu_some_percent / 100.0, 0.0, 1.0)
+                  << " some_stall_percent=" << cpu_some_percent
+                  << " full_stall_percent=" << cpu_full_percent
+                  << " selected_active_threads=" << active_threads
+                  << " selected_waiting_threads=" << waiting_threads << '\n';
 
         std::cout << "PID      TID      COMMAND                  CPU_MS    WAIT_MS  "
                      "RUNNABLE_WAIT%  SLICES\n";
@@ -241,6 +280,8 @@ void tasks(const TaskOptions& options) {
         }
         std::cout << "---\n" << std::flush;
         previous = current;
+        previous_psi = current_psi;
+        previous_time = current_time;
         ++emitted;
     }
 }
