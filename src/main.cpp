@@ -4,8 +4,11 @@
 #include "graywatch/task_stats.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -15,6 +18,9 @@
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 namespace {
 
@@ -32,7 +38,10 @@ void usage() {
                  "[--count SAMPLES]\n"
                  "  graywatchctl tasks (-p PID | -u USER) "
                  "[--interval SECONDS] [--count SAMPLES] [--top THREADS] "
-                 "[--json] [--log PATH]\n";
+                 "[--json] [--log PATH]\n"
+                 "  graywatchctl status [--socket PATH]\n"
+                 "  graywatchctl subscribe [--socket PATH] "
+                 "[--min-severity 0..1] [--count EVENTS]\n";
 }
 
 double parse_positive_double(const char* text, std::string_view option) {
@@ -127,6 +136,138 @@ TaskOptions parse_task_options(int argc, char** argv) {
         throw std::invalid_argument("tasks requires exactly one of -p or -u");
     }
     return options;
+}
+
+struct DaemonOptions {
+    std::filesystem::path socket_path{"/run/graywatchd.sock"};
+    double minimum_severity{};
+    unsigned int count{};
+};
+
+DaemonOptions parse_daemon_options(int argc, char** argv, bool subscribe) {
+    DaemonOptions options;
+    for (int index = 2; index < argc; ++index) {
+        const std::string_view argument(argv[index]);
+        if (argument == "--socket" && index + 1 < argc) {
+            options.socket_path = argv[++index];
+        } else if (subscribe && argument == "--min-severity" &&
+                   index + 1 < argc) {
+            const std::string value(argv[++index]);
+            std::size_t consumed{};
+            options.minimum_severity = std::stod(value, &consumed);
+            if (consumed != value.size() || options.minimum_severity < 0.0 ||
+                options.minimum_severity > 1.0) {
+                throw std::invalid_argument(
+                    "--min-severity must be between 0 and 1");
+            }
+        } else if (subscribe && argument == "--count" && index + 1 < argc) {
+            options.count = parse_positive_unsigned(argv[++index], "--count");
+        } else {
+            throw std::invalid_argument("unknown or incomplete option: " +
+                                        std::string(argument));
+        }
+    }
+    return options;
+}
+
+int connect_daemon(const std::filesystem::path& path) {
+    const std::string path_text = path.string();
+    if (path_text.size() >= sizeof(sockaddr_un::sun_path)) {
+        throw std::runtime_error("Unix socket path is too long");
+    }
+    const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        throw std::runtime_error("socket: " + std::string(std::strerror(errno)));
+    }
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path, path_text.c_str(), path_text.size() + 1);
+    if (connect(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) < 0) {
+        const std::string message = std::strerror(errno);
+        close(fd);
+        throw std::runtime_error("connect " + path_text + ": " + message);
+    }
+    return fd;
+}
+
+void send_command(int fd, std::string_view command) {
+    std::string message(command);
+    message.push_back('\n');
+    std::size_t sent{};
+    while (sent < message.size()) {
+        const ssize_t result = send(fd, message.data() + sent,
+                                    message.size() - sent, MSG_NOSIGNAL);
+        if (result > 0) {
+            sent += static_cast<std::size_t>(result);
+        } else if (result < 0 && errno == EINTR) {
+            continue;
+        } else {
+            throw std::runtime_error("send to daemon failed");
+        }
+    }
+}
+
+std::optional<std::string> receive_line(int fd, std::string& pending) {
+    while (true) {
+        const auto newline = pending.find('\n');
+        if (newline != std::string::npos) {
+            std::string line = pending.substr(0, newline);
+            pending.erase(0, newline + 1);
+            return line;
+        }
+        char buffer[4096];
+        const ssize_t count = recv(fd, buffer, sizeof(buffer), 0);
+        if (count > 0) {
+            pending.append(buffer, static_cast<std::size_t>(count));
+        } else if (count == 0) {
+            return std::nullopt;
+        } else if (errno != EINTR) {
+            throw std::runtime_error("receive from daemon failed");
+        }
+    }
+}
+
+void daemon_status(const DaemonOptions& options) {
+    const int fd = connect_daemon(options.socket_path);
+    try {
+        send_command(fd, "GET");
+        std::string pending;
+        const auto line = receive_line(fd, pending);
+        if (!line) {
+            throw std::runtime_error("daemon closed without a response");
+        }
+        std::cout << *line << '\n';
+        close(fd);
+    } catch (...) {
+        close(fd);
+        throw;
+    }
+}
+
+void daemon_subscribe(const DaemonOptions& options) {
+    const int fd = connect_daemon(options.socket_path);
+    try {
+        send_command(fd, "SUBSCRIBE " + std::to_string(options.minimum_severity));
+        std::string pending;
+        const auto acknowledgement = receive_line(fd, pending);
+        if (!acknowledgement || acknowledgement->find("\"subscribed\":true") ==
+                                    std::string::npos) {
+            throw std::runtime_error("subscription was rejected");
+        }
+        unsigned int received{};
+        while (options.count == 0 || received < options.count) {
+            const auto line = receive_line(fd, pending);
+            if (!line) {
+                throw std::runtime_error("daemon closed the subscription");
+            }
+            std::cout << *line << '\n' << std::flush;
+            ++received;
+        }
+        close(fd);
+    } catch (...) {
+        close(fd);
+        throw;
+    }
 }
 
 void print_snapshot(const std::vector<graywatch::PsiSample>& samples) {
@@ -354,6 +495,14 @@ int main(int argc, char** argv) {
 
     try {
         const std::string_view command(argv[1]);
+        if (command == "status") {
+            daemon_status(parse_daemon_options(argc, argv, false));
+            return 0;
+        }
+        if (command == "subscribe") {
+            daemon_subscribe(parse_daemon_options(argc, argv, true));
+            return 0;
+        }
         if (command != "psi" && command != "health" && command != "tasks") {
             throw std::invalid_argument("unknown command: " + std::string(command));
         }

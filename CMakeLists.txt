@@ -18,6 +18,10 @@ add_executable(graywatchctl src/main.cpp)
 target_link_libraries(graywatchctl PRIVATE graywatch_core)
 target_compile_options(graywatchctl PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
+add_executable(graywatchd src/daemon.cpp)
+target_link_libraries(graywatchd PRIVATE graywatch_core)
+target_compile_options(graywatchd PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(psi_test tests/psi_test.cpp)

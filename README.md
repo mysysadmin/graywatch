@@ -99,6 +99,27 @@ JSON display and flushes each complete event immediately. The initial event
 schema is version 1 and includes the timestamp, interval, resource, condition,
 severity, raw PSI evidence, selection scope, and affected thread evidence.
 
+## Local daemon
+
+`graywatchd` keeps the latest CPU-pressure event and publishes matching future
+events through a Unix-domain socket:
+
+```sh
+./build/graywatchd --socket /tmp/graywatchd.sock --interval 1 \
+  --log /tmp/graywatchd.jsonl
+
+./build/graywatchctl status --socket /tmp/graywatchd.sock
+./build/graywatchctl subscribe --socket /tmp/graywatchd.sock \
+  --min-severity 0.10
+```
+
+`status` returns one current schema-v1 JSON event. `subscribe` remains connected
+and prints future events whose severity is at least the requested value. Add
+`--count N` for a bounded subscription. The initial protocol supports `GET` and
+`SUBSCRIBE <minimum-severity>` as newline-delimited commands. The daemon refuses
+to replace an existing socket path, preventing it from unlinking another live
+service accidentally.
+
 Example output:
 
 ```text
