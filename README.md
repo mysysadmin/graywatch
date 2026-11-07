@@ -7,7 +7,9 @@ Prometheus, Grafana, remote collector, or monitoring server is required.
 
 The current implementation provides:
 
-- CPU pressure from Linux PSI when the kernel exposes it;
+- CPU, memory, and I/O pressure from Linux PSI when the kernel exposes it;
+- memory health from reclaim, swap, refault, and OOM-kill counters, with or
+  without PSI;
 - per-thread scheduler delay and uninterruptible (`D`-state) attribution;
 - per-device block activity, queueing, saturation, and absolute-latency health;
 - optional eBPF block service-time histograms and completion errors;
@@ -15,11 +17,55 @@ The current implementation provides:
 - InfiniBand link state, rate, congestion, and error-counter intervals;
 - current-state queries and resource-filtered subscriptions over a local Unix
   socket; and
-- a stateless multi-node support snapshot over SSH.
+- a stateless multi-node support snapshot over SSH; and
+- a portable incident bundle plus a report tool that turns its archive into a
+  summary for support engineers.
 
 PSI is optional. On a kernel where `/proc/pressure` is unavailable, CPU events
-explicitly report `condition: unavailable` while task, block, TCP, and
-InfiniBand evidence continues to work.
+explicitly report `condition: unavailable` while task, memory, block, TCP, and
+InfiniBand evidence continues to work. See [Enabling PSI](#enabling-psi).
+
+### Enabling PSI
+
+PSI requires Linux 4.20 or later built with `CONFIG_PSI=y`. Check for it with:
+
+```sh
+cat /proc/pressure/cpu
+grep -E 'CONFIG_PSI(_DEFAULT_DISABLED)?[= ]' /boot/config-$(uname -r)
+```
+
+RHEL, Rocky Linux, AlmaLinux, and some elrepo kernels set
+`CONFIG_PSI_DEFAULT_DISABLED=y`: PSI is compiled in but turned off until the
+kernel boots with `psi=1`. It cannot be switched on at runtime, so enabling it
+needs a reboot:
+
+```sh
+# RHEL family
+sudo grubby --update-kernel=ALL --args=psi=1
+# Debian/Ubuntu: add psi=1 to GRUB_CMDLINE_LINUX in /etc/default/grub, then
+sudo update-grub
+sudo reboot
+# afterwards
+cat /proc/pressure/cpu /proc/pressure/memory /proc/pressure/io
+```
+
+A `psi=0` argument disables PSI explicitly and must be removed instead
+(`grubby --update-kernel=ALL --remove-args=psi`). Distribution defaults
+differ and change between releases, so check rather than assume. The support
+collector records which of these cases applies as `psi_status` in `system.txt`, and the report tool prints the
+matching instructions.
+
+With PSI enabled, Graywatch additionally reports:
+
+- CPU `some`: the share of time at least one runnable task waited for a CPU;
+- memory `some`/`full`: the share of time some or all non-idle tasks were
+  stalled on memory reclaim, refaults, or swap-in; and
+- I/O `some`/`full`: the share of time tasks waited for I/O, attached to every
+  I/O device event as system-wide context.
+
+Without PSI these stall percentages are missing, but memory events still detect
+direct reclaim, swap-in, low available memory, and OOM kills from `/proc/vmstat`
+and `/proc/meminfo`.
 
 ## Build
 
@@ -122,24 +168,75 @@ sudo ./collect-graywatch-support.sh --duration 60 \
   --output /tmp/graywatch-incident.tar.gz
 ```
 
-Root is optional. It improves visibility into other users' processes, while a
-non-root collection still reports all readable CPU, block, TCP, and InfiniBand
-evidence. The support archive contains:
+Root is optional. It improves visibility into other users' processes and their
+wait channels, and lets the script read the kernel log where `dmesg_restrict`
+is set. A non-root collection still reports all readable CPU, memory, block,
+TCP, and InfiniBand evidence. The support archive contains:
 
-- system/kernel identity and procfs/sysfs mount options;
-- initial and final CPU, I/O, and network JSON state;
-- bounded interval JSON events; and
-- daemon stdout/stderr diagnostics.
+- `system.txt`: kernel/OS identity, CPU count, kernel command line, PSI status,
+  cgroup filesystem, and procfs/sysfs mount options;
+- `lsblk.json` and `mounts.txt`: block-device stacking and mounted filesystems;
+- initial and final CPU, I/O, memory, and network JSON state, plus
+  `/proc/meminfo` and `/proc/vmstat` snapshots;
+- `events.jsonl`: every one-second interval event;
+- `kernel.log`: the last 5,000 kernel log lines (omit with `--no-kernel-log`);
+  and
+- daemon stdout/stderr diagnostics and `collection-errors.txt`.
 
-Process command names and thread identifiers can appear in events. Review an
-archive before sharing it outside the affected system. The script uses a
-private temporary directory, terminates its daemon, and removes working files
-on exit; the requested output archive is the only retained result.
+A failed optional step, such as a missing `lsblk` or a status query that times
+out, is recorded in `collection-errors.txt` and does not stop the collection.
+Use `--ignore-ib-port DEVICE/PORT` (repeatable) to exclude ports known to be
+irrelevant.
+
+Process command names, thread identifiers, mount points, the kernel command
+line and kernel log lines appear in the archive. Review it before sharing it
+outside the affected system. The script uses a private temporary directory,
+terminates its daemon, and removes working files on exit; the requested output
+archive is the only retained result.
+
+### Support report
+
+`graywatch-report.py` turns a support archive into a ranked summary for a
+support engineer. It needs only Python 3.8 or newer and reads the archive in
+memory without extracting it. It runs on any machine, so the affected host
+needs no Python:
+
+```sh
+python3 tools/graywatch-report.py graywatch-incident.tar.gz
+python3 tools/graywatch-report.py graywatch-incident.tar.gz --format markdown \
+  --output incident.md
+python3 tools/graywatch-report.py graywatch-incident.tar.gz --format json
+```
+
+The report contains:
+
+- a verdict and findings ranked critical, warning, or info, each with its
+  evidence and concrete next steps;
+- an assessment that links related signals. For example, threads blocked in
+  FUSE while every local disk stays healthy point above the block layer, and a
+  slow device-mapper device whose backing disk is healthy points at the
+  stacking layer;
+- D-state threads grouped by command and wait channel, how long they stayed
+  blocked, and what the channel implicates (FUSE, NFS, block, filesystem
+  journal, locks, reclaim);
+- per-device latency percentiles, memory reclaim/swap/OOM totals, TCP
+  retransmissions, and InfiniBand port state;
+- a timeline of the degraded episodes;
+- kernel log matches (I/O errors, NVMe timeouts, hung tasks, OOM, lockups, link
+  flaps, filesystem and hardware errors). Matches from more than 15 minutes
+  before the window are reported as history rather than as findings; and
+- collection coverage: root or not, PSI status with how to enable it,
+  `hidepid`, sampling gaps, and daemon errors.
+
+The thresholds in the report are triage heuristics. The daemon's per-interval
+`condition` remains the authoritative classification.
 
 The x86-64 artifact was validated unchanged on Rocky Linux 9, Debian 13, and
 Pop!_OS with Linux 6.12, 6.18, and the playground's 5.14/7.1 kernels. Separate
 architecture builds are required for AArch64. The optional eBPF collector is
 not included because it has distinct BTF and privilege requirements.
+
+## Command-line inspection
 
 Read the current PSI snapshot:
 
@@ -169,11 +266,19 @@ Run the first adaptive health detector:
 ```
 
 Each `(resource, scope)` stream learns independently. The initial state is
-`LEARNING`; after ten samples it becomes `NORMAL`. A sample is provisionally
-anomalous when it exceeds the rolling mean by three standard deviations, and
-three consecutive anomalies produce `DEGRADED`. Three normal observations are
-required for recovery. Candidate anomalies and degraded observations are not
-added to the baseline.
+`LEARNING`; after ten samples it becomes `NORMAL`. The baseline is a rolling
+window of the last 60 accepted samples. A sample is provisionally anomalous
+when it exceeds the baseline mean by three standard deviations (the deviation
+is floored at 0.01 percentage points), and three consecutive anomalies produce
+`DEGRADED`. Three consecutive normal observations are required for recovery.
+Candidate anomalies and observations made while degraded are not added to the
+baseline; only the observation that completes recovery is.
+
+Every sample seen while `LEARNING` is accepted unconditionally, so a stream
+that starts during an incident learns the incident as its baseline. Start the
+command while the system is behaving normally. This detector is only used by
+`graywatchctl health`, which needs PSI. The daemon does not run it and
+publishes only the absolute guardrails described below.
 
 These statistical parameters are intentionally detector configuration, not
 resource-specific operational thresholds. They are provisional and remain
@@ -230,7 +335,7 @@ severity, raw PSI evidence, selection scope, and affected thread evidence.
 
 ## Local daemon
 
-`graywatchd` samples CPU/task, block, TCP, and InfiniBand evidence, keeps the
+`graywatchd` samples CPU/task, memory, block, TCP, and InfiniBand evidence, keeps the
 latest state for each resource, and publishes matching future events through a
 Unix-domain socket:
 
@@ -240,18 +345,20 @@ Unix-domain socket:
 
 ./build/graywatchctl status --socket /tmp/graywatchd.sock
 ./build/graywatchctl status --socket /tmp/graywatchd.sock --resource io
+./build/graywatchctl status --socket /tmp/graywatchd.sock --resource memory
 ./build/graywatchctl status --socket /tmp/graywatchd.sock --resource network
 ./build/graywatchctl subscribe --socket /tmp/graywatchd.sock \
   --resource io --min-severity 0.10
 ```
 
-CPU `status` returns one current schema-v1 JSON event; I/O and network status
-return JSON arrays because a machine can have several devices or interfaces.
+CPU and memory `status` return one current schema-v1 JSON event; I/O and
+network status return JSON arrays because a machine can have several devices or
+interfaces.
 `subscribe` remains connected and prints future events matching both the
 resource and minimum severity. Use `--resource all` (the default) for every
-resource and add `--count N` for a bounded subscription. The protocol supports `GET` and
-`SUBSCRIBE <minimum-severity> [cpu|io|network|all]` as newline-delimited
-commands. Omitting the protocol resource retains the original `all` behavior.
+resource and add `--count N` for a bounded subscription. The protocol supports `GET` (CPU), `GET io`, `GET memory`, `GET network`
+and `SUBSCRIBE <minimum-severity> [cpu|io|memory|network|all]` as
+newline-delimited commands. Omitting the protocol resource retains the original `all` behavior.
 The daemon refuses to replace an existing socket path, preventing it from
 unlinking another live service accidentally.
 
@@ -265,6 +372,12 @@ failure:
 - `congested`: substantial queueing or average operation latency of 20 ms+
 - `degraded`: average operation latency of 100 ms+, an absolute guardrail
 - `idle`: no completed operations in the interval
+
+Every entry in `/sys/block` is reported, including loop and device-mapper
+devices. A stacked device and the disk beneath it both appear, and comparing
+them separates delay in the stacking layer from delay in the disk. The
+`psi_*` fields on I/O events are system-wide I/O pressure, repeated on every
+device for context; they are not per-device measurements.
 
 These are baseline-independent guardrails. They prevent chronic poor service
 from becoming statistically normal, but do not replace the planned
@@ -281,15 +394,43 @@ cross-kernel, latency-injection and Quobyte correlation results.
 `status --resource network` returns one event per InfiniBand port and one
 system-wide TCP event with interval segment counts,
 retransmissions, retransmission percentage, input errors and output resets.
-TCP is `unstable` when an interval has at least ten retransmissions and a
-retransmission ratio of at least 1%; the minimum count avoids noisy ratios from
-tiny samples. InfiniBand events report logical and physical link state,
-configured rate, and interval deltas for receive errors, transmit discards,
-symbol errors, link-down events and transmit-wait ticks. Conditions are
-`healthy`, `congested`, `degraded`, or `link_down`. A down unused port is still
-reported as evidence; Graywatch does not yet know whether an application
-intended to use that port. Consumers should correlate the device/port or GID
-they selected rather than interpreting any down port as whole-machine failure.
+TCP is `degraded` when the interval has any input errors (`InErrs`, such as
+bad checksums), and otherwise `unstable` when it has at least ten
+retransmissions and a retransmission ratio of at least 1%; the minimum count
+avoids noisy ratios from tiny samples. InfiniBand events report logical and
+physical link state, configured rate, and interval deltas for receive errors,
+transmit discards, symbol errors, link-down events and transmit-wait ticks.
+Conditions are `healthy`, `congested`, `degraded`, `link_down`, or `inactive`.
+
+A down port is `inactive` (severity 0) when it has never been in use. That
+means its lifetime `port_rcv_data`, `port_xmit_data`, and `link_downed`
+counters are all zero, and the daemon has never seen it `ACTIVE`. A port that
+carried traffic or went down at least once since boot, or went down while
+being observed, is `link_down` (severity 0.8). `evidence.in_use` shows which
+rule applied. Start `graywatchd` with `--ignore-ib-port DEVICE/PORT`
+(repeatable) to drop known-irrelevant ports entirely. An `inactive` port can
+still be the one an application was configured to use, so consumers should
+correlate the device/port or GID they selected.
+
+`status --resource memory` returns one system-wide memory event from
+`/proc/meminfo` and `/proc/vmstat`. It needs neither PSI nor root. Conditions,
+in priority order:
+
+- `degraded`, `oom_kill`: the OOM killer ran during the interval;
+- `degraded`, `memory_stall_full`: PSI memory `full` of 10% or more;
+- `pressure`, `memory_stall_some`: PSI memory `some` of 10% or more;
+- `pressure`, `direct_reclaim`: an allocating task had to reclaim memory
+  itself (`allocstall_*` increased), the strongest portable stall signal
+  without PSI;
+- `pressure`, `swap_in`: 100 or more pages per second swapped in;
+- `pressure`, `low_available`: `MemAvailable` below 5% of `MemTotal`; and
+- `healthy` otherwise.
+
+The evidence includes available memory, swap use, dirty and writeback memory,
+major faults, swap-in/out rates, direct and kswapd page scanning, compaction
+stalls, file refaults, OOM kills, and the PSI values. PSI availability is
+evaluated every interval, so an interval with a failed PSI read reports
+`psi_available: false` instead of zero stall time.
 
 ## eBPF block service latency prototype
 
@@ -428,10 +569,9 @@ uses `/run`, not `/tmp`.
   `request_wait_answer` for a FUSE request). The system daemon remains
   unprivileged and reports an empty channel when the kernel's ptrace access
   check hides another user's wait channel; it does not receive `CAP_SYS_PTRACE`.
-- `affected_threads` contains the highest absolute run-queue waits first. The
-  daemon prioritizes blocked threads, then highest absolute run-queue waits,
-  and includes at most `--top N` entries (default 20), while the counts still
-  describe all observed threads.
+- `affected_threads` lists threads currently in `D` state first, then the
+  highest absolute run-queue waits, and includes at most `--top N` entries
+  (default 20), while the counts still describe all observed threads.
 
 A newly created thread needs two daemon snapshots before Graywatch can compute
 a counter delta, so it first becomes attributable in the interval after its
@@ -459,15 +599,16 @@ python3 tools/graywatch-cluster-status.py \
 
 It summarizes PSI availability, waiting-thread counts, the thread with the
 largest absolute scheduler wait, the busiest active block device, and current
-TCP/InfiniBand issues. Hosts are queried concurrently. Add `--json` when the
+TCP/InfiniBand issues; never-used `inactive` ports are not listed as issues.
+Hosts are queried concurrently. Add `--json` when the
 snapshot should be attached to a support case or processed by another tool.
 
 Example output:
 
 ```text
 HOST                   CPU/PSI            WAIT TOP THREAD                   BUSIEST DEVICE                     NETWORK
-nodea                  unavailable/no-psi  1229 worker:6.3ms                 nvme2n1:100.0% r=1.13ms w=0.21ms  mlx4_0/2:link_down
-nodeb                  unavailable/no-psi  1193 kworker:5.1ms                -                                  mlx4_0/2:link_down
+nodea                  unavailable/no-psi  1229 worker:6.3ms                 nvme2n1:100.0% r=1.13ms w=0.21ms  healthy
+nodeb                  unavailable/no-psi  1193 kworker:5.1ms                -                                  healthy
 noded                  unavailable/no-psi   918 worker:7.4ms                 -                                  healthy
 ```
 
@@ -481,7 +622,7 @@ sizes, IOPS, and queue-depth ranges; it must not train only while idle or allow
 a chronic bad state to become healthy. The design is documented in
 [docs/io-detection.md](docs/io-detection.md).
 
-Memory health beyond PSI, cgroup-scoped attribution, TCP connection-level
+Cgroup-scoped memory and CPU attribution, TCP connection-level
 evidence, FUSE/RPC latency probes, persisted transition-only logs, and a
 privilege-separated production BPF helper remain future work. The standalone
 eBPF collector is deliberately optional and privileged; `graywatchd` and its

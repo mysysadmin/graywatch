@@ -104,6 +104,36 @@ int main() {
         require(ib_json.find("\"condition\":\"link_down\"") != std::string::npos,
                 "down link not classified");
 
+        auto unused_event = ib_event;
+        unused_event.in_use = false;
+        const auto unused_json = graywatch::to_json(unused_event);
+        require(unused_json.find("\"condition\":\"inactive\"") != std::string::npos,
+                "never-used down port not classified inactive");
+        require(unused_json.find("\"severity\":0.000000") != std::string::npos,
+                "inactive port has non-zero severity");
+        require(unused_json.find("\"in_use\":false") != std::string::npos,
+                "in_use evidence absent");
+        unused_event.port.link_downed = 1;
+        require(graywatch::to_json(unused_event).find("\"condition\":\"link_down\"") !=
+                    std::string::npos,
+                "link that went down in the interval was hidden");
+
+        const graywatch::MemoryEvent memory_event{
+            .timestamp = "2026-11-06T12:34:56.789Z", .interval_seconds = 1.0,
+            .interval = {.total_kib = 1000, .available_kib = 400,
+                         .available_percent = 40.0, .direct_reclaim_stalls = 3},
+            .assessment = {.condition = graywatch::MemoryCondition::pressure,
+                           .severity = 0.4, .reason = "direct_reclaim"},
+        };
+        const auto memory_json = graywatch::to_json(memory_event);
+        require(memory_json.find("\"resource\":\"memory\"") != std::string::npos,
+                "memory resource absent");
+        require(memory_json.find("\"assessment_reason\":\"direct_reclaim\"") !=
+                    std::string::npos,
+                "memory reason absent");
+        require(memory_json.find("\"direct_reclaim_stalls\":3") != std::string::npos,
+                "memory evidence absent");
+
         const graywatch::TcpEvent tcp_event{
             .timestamp = "2026-11-06T12:34:56.789Z", .interval_seconds = 1.0,
             .interval = {.out_segments = 1000, .retransmitted_segments = 20,

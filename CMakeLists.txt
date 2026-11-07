@@ -14,6 +14,7 @@ add_library(graywatch_core
     src/detector.cpp
     src/event.cpp
     src/io_health.cpp
+    src/memory_stats.cpp
     src/network_stats.cpp
     src/psi.cpp
     src/task_stats.cpp
@@ -99,6 +100,18 @@ if(BUILD_TESTING)
     target_link_libraries(network_stats_test PRIVATE graywatch_core)
     target_compile_options(network_stats_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME network_stats COMMAND network_stats_test)
+
+    add_executable(memory_stats_test tests/memory_stats_test.cpp)
+    target_link_libraries(memory_stats_test PRIVATE graywatch_core)
+    target_compile_options(memory_stats_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME memory_stats COMMAND memory_stats_test)
+
+    find_package(Python3 3.8 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME support_report
+            COMMAND ${Python3_EXECUTABLE} -I
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/support_report_test.py)
+    endif()
 
     add_executable(user_lookup_test tests/user_lookup_test.cpp)
     target_link_libraries(user_lookup_test PRIVATE graywatch_core)

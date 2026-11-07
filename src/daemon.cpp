@@ -1,6 +1,7 @@
 #include "graywatch/block_stats.hpp"
 #include "graywatch/event.hpp"
 #include "graywatch/io_health.hpp"
+#include "graywatch/memory_stats.hpp"
 #include "graywatch/network_stats.hpp"
 #include "graywatch/psi.hpp"
 #include "graywatch/task_stats.hpp"
@@ -15,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <set>
 #include <poll.h>
 #include <stdexcept>
 #include <sstream>
@@ -40,6 +42,7 @@ struct Options {
     std::optional<std::filesystem::path> log_path;
     std::size_t top_threads{20};
     double task_interval_seconds{5.0};
+    std::set<std::string> ignored_ib_ports;
 };
 
 struct Client {
@@ -82,6 +85,13 @@ Options parse_options(int argc, char** argv) {
             if (consumed != value.size() || options.top_threads == 0) {
                 throw std::invalid_argument("--top must be positive");
             }
+        } else if (argument == "--ignore-ib-port" && index + 1 < argc) {
+            const std::string value(argv[++index]);
+            const auto slash = value.find('/');
+            if (slash == std::string::npos || slash == 0 || slash + 1 == value.size()) {
+                throw std::invalid_argument("--ignore-ib-port must be DEVICE/PORT");
+            }
+            options.ignored_ib_ports.insert(value);
         } else if (argument == "--task-interval" && index + 1 < argc) {
             options.task_interval_seconds =
                 positive_double(argv[++index], "--task-interval");
@@ -147,7 +157,8 @@ bool send_line(int fd, std::string_view line) {
 void handle_command(Client& client, std::string_view command,
                     const std::optional<std::string>& current_event,
                     const std::vector<std::string>& current_io_events,
-                    const std::vector<std::string>& current_network_events) {
+                    const std::vector<std::string>& current_network_events,
+                    const std::optional<std::string>& current_memory_event) {
     if (command == "GET") {
         if (current_event) {
             (void)send_line(client.fd, *current_event);
@@ -159,6 +170,12 @@ void handle_command(Client& client, std::string_view command,
     }
     if (command == "GET io") {
         (void)send_line(client.fd, graywatch::json_array(current_io_events));
+        return;
+    }
+    if (command == "GET memory") {
+        (void)send_line(client.fd, current_memory_event
+                                       ? *current_memory_event
+                                       : R"({"error":"state_not_ready"})");
         return;
     }
     if (command == "GET network") {
@@ -174,7 +191,8 @@ void handle_command(Client& client, std::string_view command,
             std::string extra;
             if (!(input >> severity) ||
                 ((input >> resource) && resource != "all" && resource != "cpu" &&
-                 resource != "io" && resource != "network") ||
+                 resource != "io" && resource != "network" &&
+                 resource != "memory") ||
                 (input >> extra) || severity < 0.0 || severity > 1.0) {
                 throw std::invalid_argument("range");
             }
@@ -257,15 +275,28 @@ std::vector<graywatch::PsiSample> read_available_psi() {
     }
 }
 
-std::pair<double, double> io_psi(
-    const std::vector<graywatch::PsiInterval>& pressure) {
+std::pair<double, double> resource_psi(
+    const std::vector<graywatch::PsiInterval>& pressure, std::string_view resource) {
     double some{};
     double full{};
     for (const auto& interval : pressure) {
-        if (interval.resource == "io" && interval.scope == "some") some = interval.stall_percent;
-        if (interval.resource == "io" && interval.scope == "full") full = interval.stall_percent;
+        if (interval.resource != resource) continue;
+        if (interval.scope == "some") some = interval.stall_percent;
+        if (interval.scope == "full") full = interval.stall_percent;
     }
     return {some, full};
+}
+
+std::optional<graywatch::MemorySample> read_available_memory() {
+    try {
+        return graywatch::read_memory_sample();
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::string ib_port_key(const graywatch::IbPortInterval& port) {
+    return port.device + "/" + std::to_string(port.port);
 }
 
 }  // namespace
@@ -297,8 +328,10 @@ int main(int argc, char** argv) {
         std::optional<std::string> current_event;
         std::vector<std::string> current_io_events;
         std::vector<std::string> current_network_events;
+        std::optional<std::string> current_memory_event;
+        std::set<std::string> ib_ports_seen_active;
         auto previous = read_available_psi();
-        const bool psi_available = !previous.empty();
+        auto previous_memory = read_available_memory();
         auto previous_tasks = graywatch::read_system_tasks();
         std::vector<graywatch::TaskInterval> latest_task_intervals;
         std::size_t observed_threads = previous_tasks.size();
@@ -381,7 +414,8 @@ int main(int argc, char** argv) {
                     const std::string command = clients[index].input.substr(0, newline);
                     clients[index].input.erase(0, newline + 1);
                     handle_command(clients[index], command, current_event,
-                                   current_io_events, current_network_events);
+                                   current_io_events, current_network_events,
+                                   current_memory_event);
                 }
             }
             clients.erase(std::remove_if(clients.begin(), clients.end(),
@@ -393,6 +427,10 @@ int main(int argc, char** argv) {
             const auto sample_time = std::chrono::steady_clock::now();
             if (sample_time >= next_sample) {
                 const auto current = read_available_psi();
+                // PSI is re-evaluated each interval: an interval needs both
+                // endpoints, and a read failure must not be reported as zero.
+                const bool psi_available = !previous.empty() && !current.empty();
+                const auto current_memory = read_available_memory();
                 const auto current_block = graywatch::read_block_devices();
                 const auto current_ib = graywatch::read_ib_ports();
                 const auto current_tcp = graywatch::read_tcp_sample();
@@ -438,7 +476,35 @@ int main(int argc, char** argv) {
                         client.fd = -1;
                     }
                 }
-                const auto [io_some, io_full] = io_psi(pressure);
+                current_memory_event.reset();
+                if (previous_memory && current_memory) {
+                    if (const auto memory = graywatch::calculate_memory_interval(
+                            *previous_memory, *current_memory, elapsed)) {
+                        const auto [memory_some, memory_full] =
+                            resource_psi(pressure, "memory");
+                        const graywatch::MemoryEvent memory_event{
+                            .timestamp = graywatch::current_timestamp_utc(),
+                            .interval_seconds = elapsed,
+                            .interval = *memory,
+                            .assessment = graywatch::assess_memory(
+                                *memory, psi_available, memory_some, memory_full),
+                            .psi_available = psi_available,
+                            .psi_some_stall_percent = memory_some,
+                            .psi_full_stall_percent = memory_full,
+                        };
+                        current_memory_event = graywatch::to_json(memory_event);
+                        if (log) log << *current_memory_event << '\n' << std::flush;
+                        for (auto& client : clients) {
+                            if (wants_event(client, "memory",
+                                            memory_event.assessment.severity) &&
+                                !send_line(client.fd, *current_memory_event)) {
+                                close(client.fd);
+                                client.fd = -1;
+                            }
+                        }
+                    }
+                }
+                const auto [io_some, io_full] = resource_psi(pressure, "io");
                 current_io_events.clear();
                 for (const auto& device : graywatch::calculate_block_intervals(
                          previous_block, current_block, elapsed)) {
@@ -490,19 +556,21 @@ int main(int argc, char** argv) {
                 }
                 for (const auto& port : graywatch::calculate_ib_intervals(
                          previous_ib, current_ib)) {
+                    const auto key = ib_port_key(port);
+                    if (options.ignored_ib_ports.contains(key)) continue;
+                    if (port.state == "ACTIVE") ib_ports_seen_active.insert(key);
                     const graywatch::IbPortEvent network_event{
                         .timestamp = graywatch::current_timestamp_utc(),
                         .interval_seconds = elapsed,
                         .port = port,
+                        .in_use = port.used_since_boot ||
+                                  ib_ports_seen_active.contains(key),
                     };
                     auto json = graywatch::to_json(network_event);
                     current_network_events.push_back(json);
                     if (log) log << json << '\n' << std::flush;
-                    const bool active = port.state == "ACTIVE";
-                    const auto errors = port.receive_errors + port.transmit_discards +
-                                        port.symbol_errors + port.link_downed;
-                    const double severity = !active ? 0.8 :
-                        (errors != 0 ? 0.8 : (port.transmit_wait != 0 ? 0.5 : 0.01));
+                    const double severity = graywatch::assess_ib_port(
+                        port, network_event.in_use).severity;
                     for (auto& client : clients) {
                         if (wants_event(client, "network", severity) &&
                             !send_line(client.fd, json)) {
@@ -516,12 +584,8 @@ int main(int argc, char** argv) {
                                                  return client.fd < 0;
                                              }),
                               clients.end());
-                clients.erase(std::remove_if(clients.begin(), clients.end(),
-                                             [](const Client& client) {
-                                                 return client.fd < 0;
-                                             }),
-                              clients.end());
                 previous = current;
+                previous_memory = current_memory;
                 previous_block = current_block;
                 previous_ib = current_ib;
                 previous_tcp = current_tcp;

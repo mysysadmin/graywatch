@@ -3,6 +3,13 @@ set -eu
 
 duration=60
 output=""
+kernel_log=1
+ignored_ports=""
+usage() {
+    echo "usage: $0 [--duration SECONDS] [--output ARCHIVE.tar.gz]" \
+         "[--ignore-ib-port DEVICE/PORT]... [--no-kernel-log]" >&2
+    exit 2
+}
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --duration)
@@ -15,9 +22,21 @@ while [ "$#" -gt 0 ]; do
             output=$2
             shift 2
             ;;
+        --ignore-ib-port)
+            [ "$#" -ge 2 ] || { echo "--ignore-ib-port requires DEVICE/PORT" >&2; exit 2; }
+            case "$2" in
+                */*) ;;
+                *) echo "--ignore-ib-port must be DEVICE/PORT" >&2; exit 2 ;;
+            esac
+            ignored_ports="$ignored_ports $2"
+            shift 2
+            ;;
+        --no-kernel-log)
+            kernel_log=0
+            shift
+            ;;
         *)
-            echo "usage: $0 [--duration SECONDS] [--output ARCHIVE.tar.gz]" >&2
-            exit 2
+            usage
             ;;
     esac
 done
@@ -52,18 +71,69 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Record a failed optional step instead of aborting the whole collection: a
+# partial archive is more useful to support than none.
+note_error() {
+    echo "$1" >> "$work/collection-errors.txt"
+}
+
+kernel_config() {
+    config="/boot/config-$(uname -r)"
+    if [ -r "$config" ]; then
+        grep -E "^(# )?CONFIG_$1[= ]" "$config" 2>/dev/null || true
+    elif [ -r /proc/config.gz ]; then
+        gzip -dc /proc/config.gz 2>/dev/null | grep -E "^(# )?CONFIG_$1[= ]" || true
+    fi
+}
+
+# enabled, disabled_by_default (CONFIG_PSI_DEFAULT_DISABLED without psi=1),
+# disabled_by_cmdline (psi=0), not_built, or unknown.
+psi_status() {
+    if [ -r /proc/pressure/cpu ]; then echo enabled; return; fi
+    case " $(cat /proc/cmdline 2>/dev/null) " in
+        *" psi=0 "*) echo disabled_by_cmdline; return ;;
+    esac
+    psi=$(kernel_config PSI)
+    default_disabled=$(kernel_config PSI_DEFAULT_DISABLED)
+    case "$psi" in
+        CONFIG_PSI=y)
+            case "$default_disabled" in
+                CONFIG_PSI_DEFAULT_DISABLED=y) echo disabled_by_default ;;
+                *) echo unknown ;;
+            esac
+            ;;
+        "# CONFIG_PSI is not set") echo not_built ;;
+        *) echo unknown ;;
+    esac
+}
+
 {
     echo "collected_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "duration_seconds=$duration"
+    echo "hostname=$host"
     echo "uid=$(id -u)"
-    uname -a
-    uptime 2>/dev/null || true
-    [ -r /etc/os-release ] && cat /etc/os-release
+    echo "kernel_release=$(uname -r)"
+    echo "cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)"
+    echo "psi_status=$(psi_status)"
+    echo "cgroup_fs=$(stat -fc %T /sys/fs/cgroup 2>/dev/null || echo unknown)"
     echo "proc_mount=$(findmnt -n -o OPTIONS /proc 2>/dev/null || true)"
     echo "sys_mount=$(findmnt -n -o OPTIONS /sys 2>/dev/null || true)"
+    echo "ignored_ib_ports=${ignored_ports# }"
+    echo "kernel_cmdline=$(cat /proc/cmdline 2>/dev/null || true)"
+    echo "uname=$(uname -a)"
+    echo "uptime=$(uptime 2>/dev/null || true)"
+    if [ -r /etc/os-release ]; then sed 's/^/os_/' /etc/os-release; fi
 } > "$work/system.txt"
 
-"$daemon" --socket "$socket" --interval 1 --task-interval 5 \
+lsblk -J -o NAME,KNAME,MAJ:MIN,TYPE,SIZE,ROTA,MODEL,MOUNTPOINT \
+    > "$work/lsblk.json" 2>/dev/null || note_error "lsblk unavailable"
+findmnt -rn -o TARGET,SOURCE,FSTYPE,OPTIONS > "$work/mounts.txt" 2>/dev/null ||
+    note_error "findmnt unavailable"
+
+daemon_args=""
+for port in $ignored_ports; do daemon_args="$daemon_args --ignore-ib-port $port"; done
+# shellcheck disable=SC2086 # word splitting of validated DEVICE/PORT values
+"$daemon" --socket "$socket" --interval 1 --task-interval 5 $daemon_args \
     --log "$work/events.jsonl" > "$work/daemon.stdout" 2> "$work/daemon.stderr" &
 daemon_pid=$!
 
@@ -77,21 +147,42 @@ while [ "$attempt" -lt 50 ]; do
 done
 if [ "$ready" -ne 1 ]; then
     echo "graywatchd did not create its socket" >&2
+    cat "$work/daemon.stderr" >&2 || true
     exit 1
 fi
 
+snapshot() {
+    for resource in cpu io memory network; do
+        "$client" status --socket "$socket" --resource "$resource" \
+            > "$work/$resource-$1.json" 2>> "$work/collection-errors.txt" ||
+            note_error "status $resource $1 failed"
+    done
+    cp /proc/meminfo "$work/meminfo-$1.txt" 2>/dev/null || true
+    cp /proc/vmstat "$work/vmstat-$1.txt" 2>/dev/null || true
+}
+
 sleep 2
-"$client" status --socket "$socket" --resource cpu > "$work/cpu-initial.json"
-"$client" status --socket "$socket" --resource io > "$work/io-initial.json"
-"$client" status --socket "$socket" --resource network > "$work/network-initial.json"
+snapshot initial
+echo "Collecting for ${duration}s; press Ctrl-C to abort." >&2
 sleep "$duration"
-"$client" status --socket "$socket" --resource cpu > "$work/cpu-final.json"
-"$client" status --socket "$socket" --resource io > "$work/io-final.json"
-"$client" status --socket "$socket" --resource network > "$work/network-final.json"
+if ! kill -0 "$daemon_pid" 2>/dev/null; then
+    note_error "graywatchd exited before the collection window ended"
+fi
+snapshot final
 
 kill "$daemon_pid" >/dev/null 2>&1 || true
 wait "$daemon_pid" 2>/dev/null || true
 daemon_pid=""
 
+if [ "$kernel_log" -eq 1 ]; then
+    # Kernel messages carry I/O errors, hung-task reports, OOM kills and link
+    # flaps. dmesg_restrict can deny this to non-root users.
+    { dmesg --time-format iso 2>/dev/null || dmesg 2>/dev/null; } |
+        tail -n 5000 > "$work/kernel.log" ||
+        note_error "kernel log unavailable"
+    [ -s "$work/kernel.log" ] || note_error "kernel log empty or not readable"
+fi
+
+rm -f "$socket"
 tar -C "$work" -czf "$output" .
 echo "$output"

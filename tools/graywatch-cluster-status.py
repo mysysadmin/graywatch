@@ -48,7 +48,7 @@ def inspect(host: str, timeout: float, user):
             "busiest_device": busiest,
             "network_event_count": len(network),
             "network_issues": [item for item in network
-                               if item["condition"] != "healthy"],
+                               if item["condition"] not in ("healthy", "inactive")],
         }
     except Exception as error:  # support tool must report partial cluster state
         return {"host": host, "reachable": False, "error": str(error)}

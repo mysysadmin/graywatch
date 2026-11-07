@@ -29,6 +29,7 @@ install -m 0755 "$build_dir/graywatchd" "$stage/bin/graywatchd"
 install -m 0755 "$build_dir/graywatchctl" "$stage/bin/graywatchctl"
 install -m 0755 "$root/tools/collect-graywatch-support.sh" \
     "$stage/collect-graywatch-support.sh"
+install -m 0755 "$root/tools/graywatch-report.py" "$stage/graywatch-report.py"
 install -m 0644 "$root/portable/README.txt" "$stage/README.txt"
 
 if ldd "$stage/bin/graywatchd" 2>&1 | grep -qv "not a dynamic executable"; then

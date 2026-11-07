@@ -20,6 +20,9 @@ struct IbPortSample {
     std::uint64_t symbol_errors{};
     std::uint64_t link_downed{};
     std::uint64_t transmit_wait{};
+    // Lifetime counters used only to decide whether a port was ever used.
+    std::uint64_t receive_data{};
+    std::uint64_t transmit_data{};
 };
 
 struct IbPortInterval {
@@ -33,6 +36,9 @@ struct IbPortInterval {
     std::uint64_t symbol_errors{};
     std::uint64_t link_downed{};
     std::uint64_t transmit_wait{};
+    // True when lifetime data counters or link_downed are non-zero, meaning the
+    // port has been up and carried traffic since the driver loaded.
+    bool used_since_boot{};
 };
 
 struct TcpSample {

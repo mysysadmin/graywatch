@@ -171,18 +171,27 @@ std::string to_json(const IoDeviceEvent& event) {
     return output.str();
 }
 
-std::string to_json(const IbPortEvent& event) {
-    const auto& port = event.port;
+IbPortAssessment assess_ib_port(const IbPortInterval& port, bool in_use) {
     const bool active = port.state == "ACTIVE";
     const std::uint64_t errors = port.receive_errors + port.transmit_discards +
                                  port.symbol_errors + port.link_downed;
-    const std::string_view condition = !active ? "link_down" :
-        (errors != 0 ? "degraded" :
-         (port.transmit_wait != 0 ? "congested" : "healthy"));
-    const double severity = !active ? 0.8 :
-        (errors != 0 ? std::clamp(0.8 + static_cast<double>(errors) / 100.0,
-                                  0.8, 1.0) :
-         (port.transmit_wait != 0 ? 0.5 : 0.01));
+    if (!active) {
+        // A link that went down during the interval is a failure even if the
+        // port had never carried traffic before.
+        if (in_use || port.link_downed != 0) return {"link_down", 0.8};
+        return {"inactive", 0.0};
+    }
+    if (errors != 0) {
+        return {"degraded",
+                std::clamp(0.8 + static_cast<double>(errors) / 100.0, 0.8, 1.0)};
+    }
+    if (port.transmit_wait != 0) return {"congested", 0.5};
+    return {"healthy", 0.01};
+}
+
+std::string to_json(const IbPortEvent& event) {
+    const auto& port = event.port;
+    const auto [condition, severity] = assess_ib_port(port, event.in_use);
     std::ostringstream output;
     output << std::fixed << std::setprecision(6)
            << "{\"schema_version\":" << IbPortEvent::schema_version
@@ -194,7 +203,8 @@ std::string to_json(const IbPortEvent& event) {
            << ",\"interface\":{";
     output << "\"kind\":\"infiniband\",\"device\":";
     json_string(output, port.device);
-    output << ",\"port\":" << port.port << "},\"evidence\":{\"state\":";
+    output << ",\"port\":" << port.port << "},\"evidence\":{\"in_use\":"
+           << (event.in_use ? "true" : "false") << ",\"state\":";
     json_string(output, port.state);
     output << ",\"physical_state\":";
     json_string(output, port.physical_state);
@@ -231,6 +241,46 @@ std::string to_json(const TcpEvent& event) {
            << ",\"retransmit_percent\":" << tcp.retransmit_percent
            << ",\"input_errors\":" << tcp.input_errors
            << ",\"output_resets\":" << tcp.output_resets << "}}";
+    return output.str();
+}
+
+std::string to_json(const MemoryEvent& event) {
+    const auto& memory = event.interval;
+    const auto& assessment = event.assessment;
+    std::ostringstream output;
+    output << std::fixed << std::setprecision(6)
+           << "{\"schema_version\":" << MemoryEvent::schema_version
+           << ",\"event_type\":\"resource_health\",\"timestamp\":";
+    json_string(output, event.timestamp);
+    output << ",\"resource\":\"memory\",\"condition\":\""
+           << to_string(assessment.condition) << "\",\"severity\":"
+           << assessment.severity
+           << ",\"interval_seconds\":" << event.interval_seconds
+           << ",\"evidence\":{\"source\":\"proc_meminfo_vmstat\""
+           << ",\"assessment_reason\":";
+    json_string(output, assessment.reason);
+    output << ",\"total_kib\":" << memory.total_kib
+           << ",\"available_kib\":" << memory.available_kib
+           << ",\"available_percent\":" << memory.available_percent
+           << ",\"swap_total_kib\":" << memory.swap_total_kib
+           << ",\"swap_used_kib\":" << memory.swap_used_kib
+           << ",\"dirty_kib\":" << memory.dirty_kib
+           << ",\"writeback_kib\":" << memory.writeback_kib
+           << ",\"major_faults_per_second\":" << memory.major_faults_per_second
+           << ",\"swap_in_pages_per_second\":" << memory.swap_in_pages_per_second
+           << ",\"swap_out_pages_per_second\":" << memory.swap_out_pages_per_second
+           << ",\"direct_reclaim_stalls\":" << memory.direct_reclaim_stalls
+           << ",\"direct_scanned_pages_per_second\":"
+           << memory.direct_scanned_pages_per_second
+           << ",\"kswapd_scanned_pages_per_second\":"
+           << memory.kswapd_scanned_pages_per_second
+           << ",\"compaction_stalls\":" << memory.compaction_stalls
+           << ",\"file_refaults_per_second\":" << memory.file_refaults_per_second
+           << ",\"oom_kills\":" << memory.oom_kills
+           << ",\"psi_available\":" << (event.psi_available ? "true" : "false")
+           << ",\"psi_some_stall_percent\":" << event.psi_some_stall_percent
+           << ",\"psi_full_stall_percent\":" << event.psi_full_stall_percent
+           << "}}";
     return output.str();
 }
 

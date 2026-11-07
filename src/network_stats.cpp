@@ -105,6 +105,8 @@ std::optional<IbPortInterval> calculate_ib_interval(
         .symbol_errors = current.symbol_errors - previous.symbol_errors,
         .link_downed = current.link_downed - previous.link_downed,
         .transmit_wait = current.transmit_wait - previous.transmit_wait,
+        .used_since_boot = current.receive_data != 0 || current.transmit_data != 0 ||
+                           current.link_downed != 0,
     };
 }
 
@@ -133,6 +135,8 @@ std::vector<IbPortSample> read_ib_ports(const std::filesystem::path& root) {
                 .symbol_errors = read_counter(counters / "symbol_error"),
                 .link_downed = read_counter(counters / "link_downed"),
                 .transmit_wait = read_counter(counters / "port_xmit_wait"),
+                .receive_data = read_counter(counters / "port_rcv_data"),
+                .transmit_data = read_counter(counters / "port_xmit_data"),
             });
         }
     }
