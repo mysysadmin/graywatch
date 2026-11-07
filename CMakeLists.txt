@@ -11,6 +11,7 @@ add_library(graywatch_core
     src/block_stats.cpp
     src/detector.cpp
     src/event.cpp
+    src/io_health.cpp
     src/psi.cpp
     src/task_stats.cpp
 )
@@ -76,4 +77,9 @@ if(BUILD_TESTING)
     target_link_libraries(event_test PRIVATE graywatch_core)
     target_compile_options(event_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME event_serialization COMMAND event_test)
+
+    add_executable(io_health_test tests/io_health_test.cpp)
+    target_link_libraries(io_health_test PRIVATE graywatch_core)
+    target_compile_options(io_health_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME io_health COMMAND io_health_test)
 endif()

@@ -68,6 +68,10 @@ int main() {
                        .write_iops = 20.0, .average_read_latency_ms = 0.2,
                        .busy_percent = 25.0, .average_queue_depth = 0.5,
                        .io_in_progress = 2},
+            .assessment = {.condition = graywatch::IoCondition::healthy,
+                           .severity = 0.05,
+                           .maximum_average_latency_ms = 0.2,
+                           .reason = "responsive"},
             .psi_available = false,
         };
         const auto io_json = graywatch::to_json(io_event);
@@ -77,6 +81,8 @@ int main() {
                 "device absent");
         require(io_json.find("\"psi_available\":false") != std::string::npos,
                 "PSI availability absent");
+        require(io_json.find("\"condition\":\"healthy\"") != std::string::npos,
+                "I/O assessment absent");
         require(graywatch::json_array({json, io_json}).front() == '[',
                 "JSON array not produced");
     } catch (const std::exception& error) {

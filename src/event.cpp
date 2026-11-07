@@ -122,16 +122,15 @@ std::string to_json(const CpuPressureEvent& event) {
 
 std::string to_json(const IoDeviceEvent& event) {
     const auto& device = event.device;
-    const double severity = std::clamp(device.busy_percent / 100.0, 0.0, 1.0);
-    const bool active = device.read_iops != 0.0 || device.write_iops != 0.0 ||
-                        device.discard_iops != 0.0 || device.flush_iops != 0.0;
+    const auto& assessment = event.assessment;
     std::ostringstream output;
     output << std::fixed << std::setprecision(6)
            << "{\"schema_version\":" << IoDeviceEvent::schema_version
-           << ",\"event_type\":\"resource_activity\",\"timestamp\":";
+           << ",\"event_type\":\"resource_health\",\"timestamp\":";
     json_string(output, event.timestamp);
     output << ",\"resource\":\"io\",\"condition\":\""
-           << (active ? "active" : "idle") << "\",\"severity\":" << severity
+           << to_string(assessment.condition) << "\",\"severity\":"
+           << assessment.severity
            << ",\"interval_seconds\":" << event.interval_seconds
            << ",\"device\":{\"name\":";
     json_string(output, device.name);
@@ -139,6 +138,10 @@ std::string to_json(const IoDeviceEvent& event) {
            << ",\"model\":";
     json_string(output, device.model);
     output << "},\"evidence\":{\"source\":\"sysfs_block_stat\""
+           << ",\"assessment_reason\":";
+    json_string(output, assessment.reason);
+    output << ",\"maximum_average_latency_ms\":"
+           << assessment.maximum_average_latency_ms
            << ",\"read_iops\":" << device.read_iops
            << ",\"write_iops\":" << device.write_iops
            << ",\"discard_iops\":" << device.discard_iops

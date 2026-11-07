@@ -123,9 +123,21 @@ service accidentally.
 
 `status --resource io` returns a JSON array with one current event per block
 device. These portable events come from `/sys/block/*/stat` and work without
-PSI or eBPF. Their severity is device busy fraction and their condition is
-`active` or `idle`; neither should be interpreted as degradation. Later eBPF
-latency events use separate conditions and evidence.
+PSI or eBPF. I/O health is classified without treating utilization alone as
+failure:
+
+- `healthy`: active and responsive, even when the device is fully busy
+- `saturated`: at least 90% busy with average queue depth of at least one
+- `congested`: substantial queueing or average operation latency of 20 ms+
+- `degraded`: average operation latency of 100 ms+, an absolute guardrail
+- `idle`: no completed operations in the interval
+
+These are baseline-independent guardrails. They prevent chronic poor service
+from becoming statistically normal, but do not replace the planned
+workload-aware baseline for smaller relative regressions. `assessment_reason`
+distinguishes capacity saturation from latency degradation. These kernel block
+averages include time spent queued; the optional eBPF collector adds
+per-operation tail service latency.
 
 ## eBPF block service latency prototype
 

@@ -2,6 +2,7 @@
 
 #include "graywatch/task_stats.hpp"
 #include "graywatch/block_stats.hpp"
+#include "graywatch/io_health.hpp"
 
 #include <string>
 #include <string_view>
@@ -35,6 +36,7 @@ struct IoDeviceEvent {
     std::string timestamp;
     double interval_seconds{};
     BlockDeviceInterval device;
+    IoAssessment assessment;
     bool psi_available{};
     double psi_some_stall_percent{};
     double psi_full_stall_percent{};

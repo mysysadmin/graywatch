@@ -1,5 +1,6 @@
 #include "graywatch/block_stats.hpp"
 #include "graywatch/event.hpp"
+#include "graywatch/io_health.hpp"
 #include "graywatch/psi.hpp"
 #include "graywatch/task_stats.hpp"
 
@@ -414,6 +415,7 @@ int main(int argc, char** argv) {
                         .timestamp = graywatch::current_timestamp_utc(),
                         .interval_seconds = elapsed,
                         .device = device,
+                        .assessment = graywatch::assess_io(device),
                         .psi_available = psi_available,
                         .psi_some_stall_percent = io_some,
                         .psi_full_stall_percent = io_full,
@@ -421,8 +423,7 @@ int main(int argc, char** argv) {
                     auto json = graywatch::to_json(io_event);
                     current_io_events.push_back(json);
                     if (log) log << json << '\n' << std::flush;
-                    const double severity = std::clamp(
-                        device.busy_percent / 100.0, 0.0, 1.0);
+                    const double severity = io_event.assessment.severity;
                     for (auto& client : clients) {
                         if (client.subscribed && severity >= client.minimum_severity &&
                             !send_line(client.fd, json)) {
