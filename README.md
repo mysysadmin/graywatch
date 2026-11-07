@@ -139,6 +139,11 @@ distinguishes capacity saturation from latency degradation. These kernel block
 averages include time spent queued; the optional eBPF collector adds
 per-operation tail service latency.
 
+See [docs/io-detection.md](docs/io-detection.md) for the baseline model and
+evidence boundaries, and
+[docs/playground-findings.md](docs/playground-findings.md) for validated
+cross-kernel, latency-injection and Quobyte correlation results.
+
 ## eBPF block service latency prototype
 
 Build the optional collector after initializing submodules:
