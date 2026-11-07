@@ -112,13 +112,14 @@ events through a Unix-domain socket:
 ./build/graywatchctl status --socket /tmp/graywatchd.sock --resource io
 ./build/graywatchctl status --socket /tmp/graywatchd.sock --resource network
 ./build/graywatchctl subscribe --socket /tmp/graywatchd.sock \
-  --min-severity 0.10
+  --resource io --min-severity 0.10
 ```
 
 `status` returns one current schema-v1 JSON event. `subscribe` remains connected
 and prints future events whose severity is at least the requested value. Add
 `--count N` for a bounded subscription. The initial protocol supports `GET` and
-`SUBSCRIBE <minimum-severity>` as newline-delimited commands. The daemon refuses
+`SUBSCRIBE <minimum-severity> [cpu|io|network|all]` as newline-delimited
+commands. Omitting the resource retains the original `all` behavior. The daemon refuses
 to replace an existing socket path, preventing it from unlinking another live
 service accidentally.
 

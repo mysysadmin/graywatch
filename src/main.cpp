@@ -41,6 +41,7 @@ void usage() {
                  "[--json] [--log PATH]\n"
                  "  graywatchctl status [--socket PATH] [--resource cpu|io|network]\n"
                  "  graywatchctl subscribe [--socket PATH] "
+                 "[--resource cpu|io|network|all] "
                  "[--min-severity 0..1] [--count EVENTS]\n";
 }
 
@@ -147,15 +148,18 @@ struct DaemonOptions {
 
 DaemonOptions parse_daemon_options(int argc, char** argv, bool subscribe) {
     DaemonOptions options;
+    if (subscribe) options.resource = "all";
     for (int index = 2; index < argc; ++index) {
         const std::string_view argument(argv[index]);
         if (argument == "--socket" && index + 1 < argc) {
             options.socket_path = argv[++index];
-        } else if (!subscribe && argument == "--resource" && index + 1 < argc) {
+        } else if (argument == "--resource" && index + 1 < argc) {
             options.resource = argv[++index];
             if (options.resource != "cpu" && options.resource != "io" &&
-                options.resource != "network") {
-                throw std::invalid_argument("--resource must be cpu, io, or network");
+                options.resource != "network" &&
+                (!subscribe || options.resource != "all")) {
+                throw std::invalid_argument(
+                    "--resource must be cpu, io, network, or all");
             }
         } else if (subscribe && argument == "--min-severity" &&
                    index + 1 < argc) {
@@ -255,7 +259,8 @@ void daemon_status(const DaemonOptions& options) {
 void daemon_subscribe(const DaemonOptions& options) {
     const int fd = connect_daemon(options.socket_path);
     try {
-        send_command(fd, "SUBSCRIBE " + std::to_string(options.minimum_severity));
+        send_command(fd, "SUBSCRIBE " + std::to_string(options.minimum_severity) +
+                         " " + options.resource);
         std::string pending;
         const auto acknowledgement = receive_line(fd, pending);
         if (!acknowledgement || acknowledgement->find("\"subscribed\":true") ==

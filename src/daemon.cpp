@@ -17,6 +17,7 @@
 #include <optional>
 #include <poll.h>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
@@ -46,7 +47,14 @@ struct Client {
     std::string input;
     bool subscribed{};
     double minimum_severity{};
+    std::string resource{"all"};
 };
+
+bool wants_event(const Client& client, std::string_view resource,
+                 double severity) {
+    return client.subscribed && severity >= client.minimum_severity &&
+           (client.resource == "all" || client.resource == resource);
+}
 
 double positive_double(const char* text, std::string_view option) {
     std::size_t consumed{};
@@ -160,15 +168,22 @@ void handle_command(Client& client, std::string_view command,
     constexpr std::string_view prefix = "SUBSCRIBE ";
     if (command.starts_with(prefix)) {
         try {
-            std::size_t consumed{};
-            const std::string value(command.substr(prefix.size()));
-            const double severity = std::stod(value, &consumed);
-            if (consumed != value.size() || severity < 0.0 || severity > 1.0) {
+            std::istringstream input{std::string(command.substr(prefix.size()))};
+            double severity{};
+            std::string resource{"all"};
+            std::string extra;
+            if (!(input >> severity) ||
+                ((input >> resource) && resource != "all" && resource != "cpu" &&
+                 resource != "io" && resource != "network") ||
+                (input >> extra) || severity < 0.0 || severity > 1.0) {
                 throw std::invalid_argument("range");
             }
             client.subscribed = true;
             client.minimum_severity = severity;
-            (void)send_line(client.fd, R"({"subscribed":true})");
+            client.resource = resource;
+            (void)send_line(client.fd,
+                std::string(R"({"subscribed":true,"resource":")") +
+                resource + R"("})");
         } catch (const std::exception&) {
             (void)send_line(client.fd,
                             R"({"error":"invalid_minimum_severity"})");
@@ -417,7 +432,7 @@ int main(int argc, char** argv) {
                     log << *current_event << '\n' << std::flush;
                 }
                 for (auto& client : clients) {
-                    if (client.subscribed && event.severity >= client.minimum_severity &&
+                    if (wants_event(client, "cpu", event.severity) &&
                         !send_line(client.fd, *current_event)) {
                         close(client.fd);
                         client.fd = -1;
@@ -441,7 +456,7 @@ int main(int argc, char** argv) {
                     if (log) log << json << '\n' << std::flush;
                     const double severity = io_event.assessment.severity;
                     for (auto& client : clients) {
-                        if (client.subscribed && severity >= client.minimum_severity &&
+                        if (wants_event(client, "io", severity) &&
                             !send_line(client.fd, json)) {
                             close(client.fd);
                             client.fd = -1;
@@ -466,7 +481,7 @@ int main(int argc, char** argv) {
                         (unstable ? std::clamp(tcp->retransmit_percent / 10.0,
                                                0.4, 1.0) : 0.01);
                     for (auto& client : clients) {
-                        if (client.subscribed && severity >= client.minimum_severity &&
+                        if (wants_event(client, "network", severity) &&
                             !send_line(client.fd, json)) {
                             close(client.fd);
                             client.fd = -1;
@@ -489,7 +504,7 @@ int main(int argc, char** argv) {
                     const double severity = !active ? 0.8 :
                         (errors != 0 ? 0.8 : (port.transmit_wait != 0 ? 0.5 : 0.01));
                     for (auto& client : clients) {
-                        if (client.subscribed && severity >= client.minimum_severity &&
+                        if (wants_event(client, "network", severity) &&
                             !send_line(client.fd, json)) {
                             close(client.fd);
                             client.fd = -1;
