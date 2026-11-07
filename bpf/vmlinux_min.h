@@ -6,6 +6,10 @@ typedef unsigned short __u16;
 typedef unsigned int __u32;
 typedef unsigned long long __u64;
 typedef signed int __s32;
+typedef signed long long __s64;
+typedef __u16 __be16;
+typedef __u32 __be32;
+typedef __u32 __wsum;
 
 typedef __u32 dev_t;
 
