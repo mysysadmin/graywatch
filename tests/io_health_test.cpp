@@ -11,7 +11,7 @@ void require(bool value, const char* message) {
 
 int main() {
     try {
-        graywatch::BlockDeviceInterval device{.name = "test"};
+        graywatch::BlockDeviceInterval device{.name = "test", .model = "test"};
         auto result = graywatch::assess_io(device);
         require(result.condition == graywatch::IoCondition::idle, "idle misclassified");
 
