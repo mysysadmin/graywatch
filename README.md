@@ -211,7 +211,10 @@ TCP, and InfiniBand evidence. The support archive contains:
 A failed optional step, such as a missing `lsblk` or a status query that times
 out, is recorded in `collection-errors.txt` and does not stop the collection.
 Use `--ignore-ib-port DEVICE/PORT` (repeatable) to exclude ports known to be
-irrelevant.
+irrelevant. The script uses the binaries in the bundle's `bin/`. Set
+`GRAYWATCH_REPORT` or `GRAYWATCH_BPF` to the path of a different
+`graywatch-report` or `graywatch-bpf`, for example when running the script
+from a source checkout.
 
 Process command names, thread identifiers, mount points, the kernel command
 line and kernel log lines appear in the archive. Review it before sharing it

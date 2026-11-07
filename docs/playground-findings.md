@@ -102,3 +102,46 @@ all four nodes showed active traffic with zero new retransmissions and input
 errors in the validation windows. This demonstrates why lifetime TCP counters
 must not be interpreted as current degradation.
 
+
+## eBPF helper (graywatch-bpf)
+
+Validated 2026-11-07 with one CO-RE binary on the 5.14 and 7.1 kernels, using
+disposable fixtures only. No Quobyte mount or disk was altered.
+
+- **FUSE on 5.14 (Quobyte, read-only observation):** the helper attached to
+  `fuse_simple_request`. LOOKUP averaged 0.06 ms; READDIRPLUS averaged 142 ms.
+- **FUSE on 7.1 (`tests/fuse_delay_fixture.c`):** the helper attached to
+  `__fuse_simple_request`. Lookups delayed by 40 ms measured 40.1 ms. A
+  request held by a stopped fixture was reported as outstanding at 1.65 s and
+  timed at 4.0 s once answered.
+- **End to end on nodeb (5.14, PSI enabled):** the fixture with a 300 ms delay
+  was stopped for 8 s during a `stat`, while `collect-graywatch-support.sh
+  --duration 20` ran. `report.txt` raised two critical findings: a LOOKUP
+  outstanding for 7.7 s, and slow LOOKUPs (21 requests, 8.3 s maximum). It
+  also concluded that the delay was above the local block layer, because every
+  local disk stayed healthy.
+- **D-state:** a direct read through a disposable dm-delay mapping was reported
+  as still blocked after 1.97 s, with its `submit_bio_wait` kernel stack.
+- **TCP:** an nftables rule dropping every fifth packet (`numgen random mod 5
+  == 0 drop`) in a private network namespace produced per-connection
+  retransmits. The 7.1 kernel has no `sch_netem`, so netem could not be used.
+  One real retransmit to Quobyte port 7875 was also recorded.
+- **Reclaim:** a memory-limited cgroup produced 125 memcg reclaim stalls,
+  attributed to the process and cgroup.
+- **Overhead (nodea, `kernel.bpf_stats_enabled`):** about 1.5 µs of BPF time
+  per context switch across the scheduler collectors, i.e. 57 ms of CPU in
+  8.5 s on 72 CPUs (0.009%) at 5,300 switches per second. The helper process
+  used 0.47 s of CPU in 9 s and 30 MB RSS. The sysctl was reset to 0 afterwards.
+
+Problems found in this real data and fixed before the commit:
+- interrupt noise frames at the start of 5.14 stacks;
+- GETXATTR `ENODATA` replies counted as errors;
+- Graywatch's own processes listed in the findings;
+- InfiniBand `transmit_wait` noise raised as a warning;
+- interval maxima below the average;
+- IPv4-mapped addresses shown in IPv6 form; and
+- empty cgroup paths for cgroups that had already exited.
+
+The portable bundle built in the `rocky9` container (`tools/build-in-docker.sh`)
+passed its checksums on nodeb. Its `graywatch-bpf` loaded all six collectors
+there, linking only glibc, libelf, libz and libzstd dynamically.
