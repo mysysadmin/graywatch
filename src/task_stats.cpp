@@ -51,7 +51,19 @@ std::optional<TaskSample> read_task(int pid, int tid, unsigned int uid,
         return std::nullopt;
     }
     try {
-        return parse_task_schedstat(pid, tid, uid, std::move(command), line);
+        auto sample = parse_task_schedstat(pid, tid, uid, std::move(command), line);
+        std::ifstream status(task_directory / "status");
+        std::string key;
+        while (status >> key) {
+            if (key == "State:") {
+                status >> sample.state;
+                break;
+            }
+            std::getline(status, line);
+        }
+        std::ifstream wchan(task_directory / "wchan");
+        std::getline(wchan, sample.wait_channel);
+        return sample;
     } catch (const std::exception&) {
         return std::nullopt;
     }
@@ -91,6 +103,8 @@ std::optional<TaskInterval> calculate_task_interval(const TaskSample& previous,
         .tid = current.tid,
         .uid = current.uid,
         .command = current.command,
+        .state = current.state,
+        .wait_channel = current.wait_channel,
         .runtime_ns = runtime_ns,
         .runqueue_wait_ns = wait_ns,
         .timeslices = current.timeslices - previous.timeslices,
@@ -192,6 +206,9 @@ std::vector<TaskInterval> calculate_task_intervals(
     }
     std::sort(intervals.begin(), intervals.end(),
               [](const auto& left, const auto& right) {
+                  if ((left.state == 'D') != (right.state == 'D')) {
+                      return left.state == 'D';
+                  }
                   if (left.runqueue_wait_ns != right.runqueue_wait_ns) {
                       return left.runqueue_wait_ns > right.runqueue_wait_ns;
                   }

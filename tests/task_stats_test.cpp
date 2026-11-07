@@ -25,11 +25,13 @@ int main() {
 
         const graywatch::TaskSample previous{
             .pid = 100, .tid = 101, .uid = 1000, .command = "old",
+            .state = 'S', .wait_channel = "futex_wait_queue",
             .runtime_ns = 10'000'000, .runqueue_wait_ns = 2'000'000,
             .timeslices = 10,
         };
         const graywatch::TaskSample current{
             .pid = 100, .tid = 101, .uid = 1000, .command = "worker",
+            .state = 'D', .wait_channel = "request_wait_answer",
             .runtime_ns = 18'000'000, .runqueue_wait_ns = 4'000'000,
             .timeslices = 13,
         };
@@ -37,6 +39,9 @@ int main() {
         require(interval.has_value(), "valid interval was rejected");
         require(interval->runtime_ns == 8'000'000, "runtime delta is wrong");
         require(interval->runqueue_wait_ns == 2'000'000, "wait delta is wrong");
+        require(interval->state == 'D', "current task state is wrong");
+        require(interval->wait_channel == "request_wait_answer",
+                "current wait channel is wrong");
         require(std::abs(interval->runnable_wait_percent - 20.0) < 0.0001,
                 "runnable wait percentage is wrong");
 
@@ -47,16 +52,19 @@ int main() {
 
         const graywatch::TaskSample other{
             .pid = 200, .tid = 200, .uid = 1000, .command = "other",
+            .state = 'R', .wait_channel = "0",
             .runtime_ns = 5'000'000, .runqueue_wait_ns = 8'000'000,
             .timeslices = 5,
         };
         const auto intervals = graywatch::calculate_task_intervals(
             {previous, {.pid = 200, .tid = 200, .uid = 1000,
-                        .command = "other", .runtime_ns = 1'000'000,
+                        .command = "other", .state = 'S',
+                        .wait_channel = "ep_poll", .runtime_ns = 1'000'000,
                         .runqueue_wait_ns = 1'000'000, .timeslices = 1}},
             {current, other});
         require(intervals.size() == 2, "interval matching failed");
-        require(intervals.front().pid == 200, "intervals were not wait-sorted");
+        require(intervals.front().pid == 100,
+                "blocked task was not prioritized over runnable wait");
     } catch (const std::exception& error) {
         std::cerr << "task_stats_test: " << error.what() << '\n';
         return 1;

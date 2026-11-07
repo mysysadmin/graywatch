@@ -195,12 +195,16 @@ graywatch::CpuPressureEvent make_event(
         tasks.begin(), tasks.end(), [](const auto& task) {
             return task.runqueue_wait_ns != 0;
         });
+    const auto blocked_threads = std::count_if(
+        tasks.begin(), tasks.end(), [](const auto& task) {
+            return task.state == 'D';
+        });
     std::vector<graywatch::TaskInterval> affected;
     for (const auto& task : tasks) {
         if (affected.size() >= top_threads) {
             break;
         }
-        if (task.runqueue_wait_ns != 0) {
+        if (task.state == 'D' || task.runqueue_wait_ns != 0) {
             affected.push_back(task);
         }
     }
@@ -219,6 +223,7 @@ graywatch::CpuPressureEvent make_event(
         .selected_observed_threads = observed_threads,
         .selected_active_threads = static_cast<std::size_t>(active_threads),
         .selected_waiting_threads = static_cast<std::size_t>(waiting_threads),
+        .selected_blocked_threads = static_cast<std::size_t>(blocked_threads),
         .affected_threads = std::move(affected),
     };
 }

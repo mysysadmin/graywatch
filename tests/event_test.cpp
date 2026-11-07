@@ -31,11 +31,14 @@ int main() {
             .selected_observed_threads = 4,
             .selected_active_threads = 2,
             .selected_waiting_threads = 1,
+            .selected_blocked_threads = 1,
             .affected_threads = {{
                 .pid = 10,
                 .tid = 11,
                 .uid = 1000,
                 .command = "worker\\one",
+                .state = 'D',
+                .wait_channel = "request_wait_answer",
                 .runtime_ns = 20'000'000,
                 .runqueue_wait_ns = 5'000'000,
                 .timeslices = 3,
@@ -59,6 +62,10 @@ int main() {
         require(json.find("\"runnable_wait_percent\":20.000000") !=
                     std::string::npos,
                 "thread evidence is absent");
+        require(json.find("\"blocked_threads\":1") != std::string::npos,
+                "blocked thread count is absent");
+        require(json.find("request_wait_answer") != std::string::npos,
+                "wait channel is absent");
 
         const graywatch::IoDeviceEvent io_event{
             .timestamp = "2026-11-06T12:34:56.789Z",

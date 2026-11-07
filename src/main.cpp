@@ -415,13 +415,17 @@ void tasks(const TaskOptions& options) {
             intervals.begin(), intervals.end(), [](const auto& interval) {
                 return interval.runqueue_wait_ns != 0;
             });
+        const auto blocked_threads = std::count_if(
+            intervals.begin(), intervals.end(), [](const auto& interval) {
+                return interval.state == 'D';
+            });
 
         std::vector<graywatch::TaskInterval> affected;
         for (const auto& interval : intervals) {
             if (affected.size() >= options.top) {
                 break;
             }
-            if (interval.runqueue_wait_ns != 0) {
+            if (interval.state == 'D' || interval.runqueue_wait_ns != 0) {
                 affected.push_back(interval);
             }
         }
@@ -440,6 +444,7 @@ void tasks(const TaskOptions& options) {
             .selected_observed_threads = current.size(),
             .selected_active_threads = static_cast<std::size_t>(active_threads),
             .selected_waiting_threads = static_cast<std::size_t>(waiting_threads),
+            .selected_blocked_threads = static_cast<std::size_t>(blocked_threads),
             .affected_threads = std::move(affected),
         };
         const std::string event_json = graywatch::to_json(event);
@@ -462,21 +467,25 @@ void tasks(const TaskOptions& options) {
                   << " full_stall_percent=" << event.full_stall_percent
                   << " selected_active_threads=" << event.selected_active_threads
                   << " selected_waiting_threads=" << event.selected_waiting_threads
+                  << " selected_blocked_threads=" << event.selected_blocked_threads
                   << '\n';
 
-        std::cout << "PID      TID      COMMAND                  CPU_MS    WAIT_MS  "
-                     "RUNNABLE_WAIT%  SLICES\n";
+        std::cout << "PID      TID      S WCHAN                    COMMAND          "
+                     "CPU_MS    WAIT_MS  RUNNABLE_WAIT%  SLICES\n";
         unsigned int shown{};
         for (const auto& interval : intervals) {
             if (shown >= options.top) {
                 break;
             }
-            if (interval.runtime_ns == 0 && interval.runqueue_wait_ns == 0) {
+            if (interval.state != 'D' && interval.runtime_ns == 0 &&
+                interval.runqueue_wait_ns == 0) {
                 continue;
             }
             std::cout << std::left << std::setw(9) << interval.pid
                       << std::setw(9) << interval.tid
-                      << std::setw(25) << interval.command.substr(0, 24)
+                      << std::setw(2) << interval.state
+                      << std::setw(25) << interval.wait_channel.substr(0, 24)
+                      << std::setw(17) << interval.command.substr(0, 16)
                       << std::right << std::setw(9)
                       << static_cast<double>(interval.runtime_ns) / 1'000'000.0
                       << std::setw(11)

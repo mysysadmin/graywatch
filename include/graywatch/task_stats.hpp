@@ -14,6 +14,8 @@ struct TaskSample {
     int tid{};
     unsigned int uid{};
     std::string command;
+    char state{'?'};
+    std::string wait_channel;
     std::uint64_t runtime_ns{};
     std::uint64_t runqueue_wait_ns{};
     std::uint64_t timeslices{};
@@ -24,6 +26,8 @@ struct TaskInterval {
     int tid{};
     unsigned int uid{};
     std::string command;
+    char state{'?'};
+    std::string wait_channel;
     std::uint64_t runtime_ns{};
     std::uint64_t runqueue_wait_ns{};
     std::uint64_t timeslices{};

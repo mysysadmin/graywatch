@@ -97,6 +97,7 @@ std::string to_json(const CpuPressureEvent& event) {
            << ",\"observed_threads\":" << event.selected_observed_threads
            << ",\"active_threads\":" << event.selected_active_threads
            << ",\"waiting_threads\":" << event.selected_waiting_threads
+           << ",\"blocked_threads\":" << event.selected_blocked_threads
            << "},\"affected_threads\":[";
 
     bool first = true;
@@ -108,6 +109,10 @@ std::string to_json(const CpuPressureEvent& event) {
         output << "{\"pid\":" << thread.pid << ",\"tid\":" << thread.tid
                << ",\"uid\":" << thread.uid << ",\"command\":";
         json_string(output, thread.command);
+        output << ",\"state\":";
+        json_string(output, std::string(1, thread.state));
+        output << ",\"wait_channel\":";
+        json_string(output, thread.wait_channel);
         output << ",\"cpu_ms\":"
                << static_cast<double>(thread.runtime_ns) / 1'000'000.0
                << ",\"runqueue_wait_ms\":"

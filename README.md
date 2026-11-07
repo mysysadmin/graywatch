@@ -269,8 +269,12 @@ uses `/run`, not `/tmp`.
   to bound `/proc` scanning overhead.
 - `selection.active_threads` counts sampled threads that ran or waited during
   the interval; `waiting_threads` counts those with run-queue delay.
+- `selection.blocked_threads` counts threads currently in uninterruptible
+  `D` state. Each affected thread includes `state` and the kernel
+  `wait_channel` (for example, `request_wait_answer` for a FUSE request).
 - `affected_threads` contains the highest absolute run-queue waits first. The
-  daemon includes at most `--top N` entries (default 20), while the counts still
+  daemon prioritizes blocked threads, then highest absolute run-queue waits,
+  and includes at most `--top N` entries (default 20), while the counts still
   describe all observed threads.
 
 A newly created thread needs two daemon snapshots before Graywatch can compute
