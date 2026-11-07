@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(GRAYWATCH_STATIC "Link the core Graywatch executables statically" OFF)
+
 add_library(graywatch_core
     src/block_stats.cpp
     src/detector.cpp
@@ -26,6 +28,14 @@ target_compile_options(graywatchctl PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_executable(graywatchd src/daemon.cpp)
 target_link_libraries(graywatchd PRIVATE graywatch_core)
 target_compile_options(graywatchd PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+if(GRAYWATCH_STATIC)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "GRAYWATCH_STATIC is supported only on Linux")
+    endif()
+    target_link_options(graywatchctl PRIVATE -static)
+    target_link_options(graywatchd PRIVATE -static)
+endif()
 
 install(TARGETS graywatchctl
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

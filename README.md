@@ -45,18 +45,20 @@ On Fedora, install the equivalent packages:
 sudo dnf install -y gcc-c++ cmake ninja-build git make pkgconf-pkg-config
 ```
 
-Rocky Linux 9's currently enabled playground repositories do not contain
-`ninja-build`. Install the base tools, enable a repository that provides Ninja
-(commonly EPEL), then verify the executable before configuring Graywatch:
+Rocky Linux 9 provides Ninja and the static runtimes in the CRB repository,
+which is disabled by default. Enable CRB, install the packages, and verify the
+executable before configuring Graywatch:
 
 ```sh
-sudo dnf install -y gcc-c++ cmake git make pkgconf-pkg-config
-sudo dnf install -y epel-release
-sudo dnf install -y ninja-build
+sudo dnf install -y dnf-plugins-core
+sudo dnf config-manager --set-enabled crb
+sudo dnf install -y \
+  gcc-c++ cmake ninja-build git make pkgconf-pkg-config \
+  glibc-static libstdc++-static
 ninja --version
 ```
 
-If EPEL is intentionally unavailable, install a trusted upstream Ninja binary
+If CRB is intentionally unavailable, install a trusted upstream Ninja binary
 through the site's normal package-management process. Graywatch's documented
 and supported CMake configuration uses `-G Ninja`; do not silently fall back to
 a different generator in deployment automation.
