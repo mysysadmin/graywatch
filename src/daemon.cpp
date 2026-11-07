@@ -163,6 +163,9 @@ graywatch::CpuPressureEvent make_event(
         .full_stall_percent = full,
         .selection_kind = "system",
         .selection_value = "all",
+        .selected_active_threads = 0,
+        .selected_waiting_threads = 0,
+        .affected_threads = {},
     };
 }
 
@@ -231,7 +234,12 @@ int main(int argc, char** argv) {
                         throw std::runtime_error("accept: " +
                                                  std::string(std::strerror(errno)));
                     }
-                    clients.push_back({.fd = client_fd});
+                    clients.push_back({
+                        .fd = client_fd,
+                        .input = {},
+                        .subscribed = false,
+                        .minimum_severity = 0.0,
+                    });
                 }
             }
 
