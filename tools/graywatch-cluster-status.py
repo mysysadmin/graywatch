@@ -8,26 +8,27 @@ import subprocess
 import sys
 
 
-def remote_json(host: str, resource: str, timeout: float):
+def remote_json(host: str, resource: str, timeout: float, user):
+    destination = f"{user}@{host}" if user else host
     command = [
         "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={int(timeout)}",
-        host, "/usr/bin/graywatchctl", "status", "--resource", resource,
+        destination, "/usr/bin/graywatchctl", "status", "--resource", resource,
     ]
     result = subprocess.run(command, capture_output=True, text=True,
                             timeout=timeout, check=True)
     return json.loads(result.stdout)
 
 
-def inspect(host: str, timeout: float):
+def inspect(host: str, timeout: float, user):
     try:
-        cpu = remote_json(host, "cpu", timeout)
-        devices = remote_json(host, "io", timeout)
+        cpu = remote_json(host, "cpu", timeout, user)
+        devices = remote_json(host, "io", timeout, user)
         selection = cpu["selection"]
         affected = cpu.get("affected_threads", [])
         top_thread = max(affected, key=lambda item: item["runqueue_wait_ms"],
                          default=None)
         active_devices = [item for item in devices
-                          if item["condition"] == "active"]
+                          if item["condition"] != "idle"]
         busiest = max(active_devices,
                       key=lambda item: item["evidence"]["busy_percent"],
                       default=None)
@@ -68,11 +69,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("hosts", nargs="+", help="SSH host names or addresses")
     parser.add_argument("--timeout", type=float, default=8.0)
+    parser.add_argument("--user", help="SSH user (for example, root)")
     parser.add_argument("--json", action="store_true", dest="as_json")
     arguments = parser.parse_args()
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(len(arguments.hosts), 16)) as executor:
-        futures = [executor.submit(inspect, host, arguments.timeout)
+        futures = [executor.submit(inspect, host, arguments.timeout,
+                                   arguments.user)
                    for host in arguments.hosts]
         rows = [future.result() for future in futures]
 
