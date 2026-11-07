@@ -27,16 +27,15 @@ std::string operation_name(std::uint32_t operation) {
     }
 }
 
-std::uint64_t percentile_us(const std::uint64_t *buckets, std::uint64_t count,
-                            double fraction) {
+__u64 percentile_us(const __u64 *buckets, __u64 count, double fraction) {
     if (count == 0) return 0;
-    const auto target = static_cast<std::uint64_t>(count * fraction + 0.999999);
-    std::uint64_t seen{};
+    const auto target = static_cast<__u64>(count * fraction + 0.999999);
+    __u64 seen{};
     for (unsigned int index = 0; index < GRAYWATCH_LATENCY_BUCKETS; ++index) {
         seen += buckets[index];
-        if (seen >= target) return std::uint64_t{1} << (index + 1);
+        if (seen >= target) return __u64{1} << (index + 1);
     }
-    return std::uint64_t{1} << GRAYWATCH_LATENCY_BUCKETS;
+    return __u64{1} << GRAYWATCH_LATENCY_BUCKETS;
 }
 
 io_stats difference(const io_stats& current, const io_stats& previous) {
