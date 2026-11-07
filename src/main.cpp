@@ -1,11 +1,14 @@
 #include "graywatch/detector.hpp"
 #include "graywatch/psi.hpp"
+#include "graywatch/task_stats.hpp"
 
 #include <chrono>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <optional>
+#include <pwd.h>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
@@ -23,7 +26,9 @@ void usage() {
                  "  graywatchctl psi [--watch] [--interval SECONDS] "
                  "[--count SAMPLES]\n"
                  "  graywatchctl health [--interval SECONDS] "
-                 "[--count SAMPLES]\n";
+                 "[--count SAMPLES]\n"
+                 "  graywatchctl tasks (-p PID | -u USER) "
+                 "[--interval SECONDS] [--count SAMPLES] [--top THREADS]\n";
 }
 
 double parse_positive_double(const char* text, std::string_view option) {
@@ -63,6 +68,46 @@ Options parse_options(int argc, char** argv, bool health_command) {
     }
     if (options.count != 0 && !options.watch) {
         throw std::invalid_argument("--count requires --watch");
+    }
+    return options;
+}
+
+struct TaskOptions {
+    std::optional<int> pid;
+    std::optional<unsigned int> uid;
+    double interval_seconds{1.0};
+    unsigned int count{};
+    unsigned int top{20};
+};
+
+TaskOptions parse_task_options(int argc, char** argv) {
+    TaskOptions options;
+    for (int index = 2; index < argc; ++index) {
+        const std::string_view argument(argv[index]);
+        if (argument == "-p" && index + 1 < argc) {
+            options.pid = static_cast<int>(
+                parse_positive_unsigned(argv[++index], "-p"));
+        } else if (argument == "-u" && index + 1 < argc) {
+            const std::string user(argv[++index]);
+            const passwd* entry = getpwnam(user.c_str());
+            if (entry == nullptr) {
+                throw std::invalid_argument("unknown user: " + user);
+            }
+            options.uid = entry->pw_uid;
+        } else if (argument == "--interval" && index + 1 < argc) {
+            options.interval_seconds =
+                parse_positive_double(argv[++index], "--interval");
+        } else if (argument == "--count" && index + 1 < argc) {
+            options.count = parse_positive_unsigned(argv[++index], "--count");
+        } else if (argument == "--top" && index + 1 < argc) {
+            options.top = parse_positive_unsigned(argv[++index], "--top");
+        } else {
+            throw std::invalid_argument("unknown or incomplete option: " +
+                                        std::string(argument));
+        }
+    }
+    if (options.pid.has_value() == options.uid.has_value()) {
+        throw std::invalid_argument("tasks requires exactly one of -p or -u");
     }
     return options;
 }
@@ -151,6 +196,55 @@ void health(const Options& options) {
     }
 }
 
+std::vector<graywatch::TaskSample> read_selected_tasks(const TaskOptions& options) {
+    if (options.pid) {
+        return graywatch::read_process_tasks(*options.pid);
+    }
+    return graywatch::read_user_tasks(*options.uid);
+}
+
+void tasks(const TaskOptions& options) {
+    auto previous = read_selected_tasks(options);
+    if (previous.empty()) {
+        throw std::runtime_error("no readable tasks matched the selection");
+    }
+    unsigned int emitted{};
+    const auto sleep_duration = std::chrono::duration<double>(options.interval_seconds);
+    while (options.count == 0 || emitted < options.count) {
+        std::this_thread::sleep_for(sleep_duration);
+        const auto current = read_selected_tasks(options);
+        const auto intervals = graywatch::calculate_task_intervals(previous, current);
+
+        std::cout << "PID      TID      COMMAND                  CPU_MS    WAIT_MS  "
+                     "RUNNABLE_WAIT%  SLICES\n";
+        unsigned int shown{};
+        for (const auto& interval : intervals) {
+            if (shown >= options.top) {
+                break;
+            }
+            if (interval.runtime_ns == 0 && interval.runqueue_wait_ns == 0) {
+                continue;
+            }
+            std::cout << std::left << std::setw(9) << interval.pid
+                      << std::setw(9) << interval.tid
+                      << std::setw(25) << interval.command.substr(0, 24)
+                      << std::right << std::setw(9)
+                      << static_cast<double>(interval.runtime_ns) / 1'000'000.0
+                      << std::setw(11)
+                      << static_cast<double>(interval.runqueue_wait_ns) / 1'000'000.0
+                      << std::setw(16) << interval.runnable_wait_percent
+                      << std::setw(8) << interval.timeslices << '\n';
+            ++shown;
+        }
+        if (shown == 0) {
+            std::cout << "(no selected thread was runnable during this interval)\n";
+        }
+        std::cout << "---\n" << std::flush;
+        previous = current;
+        ++emitted;
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -161,8 +255,13 @@ int main(int argc, char** argv) {
 
     try {
         const std::string_view command(argv[1]);
-        if (command != "psi" && command != "health") {
+        if (command != "psi" && command != "health" && command != "tasks") {
             throw std::invalid_argument("unknown command: " + std::string(command));
+        }
+        if (command == "tasks") {
+            std::cout << std::fixed << std::setprecision(2);
+            tasks(parse_task_options(argc, argv));
+            return 0;
         }
         const bool health_command = command == "health";
         const auto options = parse_options(argc, argv, health_command);

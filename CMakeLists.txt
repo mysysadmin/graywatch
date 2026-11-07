@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(graywatch_core
     src/detector.cpp
     src/psi.cpp
+    src/task_stats.cpp
 )
 target_include_directories(graywatch_core PUBLIC include)
 target_compile_options(graywatch_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -27,4 +28,9 @@ if(BUILD_TESTING)
     target_link_libraries(detector_test PRIVATE graywatch_core)
     target_compile_options(detector_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME degradation_detector COMMAND detector_test)
+
+    add_executable(task_stats_test tests/task_stats_test.cpp)
+    target_link_libraries(task_stats_test PRIVATE graywatch_core)
+    target_compile_options(task_stats_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME task_stats COMMAND task_stats_test)
 endif()

@@ -55,6 +55,25 @@ These statistical parameters are intentionally detector configuration, not
 resource-specific operational thresholds. They are provisional and remain
 visible in the output so their behavior can be evaluated rather than assumed.
 
+Inspect CPU scheduling delay for one process or all processes owned by a user:
+
+```sh
+./build/graywatchctl tasks -p 1234 --interval 1
+./build/graywatchctl tasks -u postgres --interval 1 --top 20
+```
+
+This command samples Linux `schedstat` counters for every selected thread. Its
+`RUNNABLE_WAIT%` is run-queue wait divided by CPU service plus run-queue wait;
+time spent sleeping voluntarily is excluded. A busy thread with a low value is
+receiving CPU efficiently, while a high value means it was runnable but the
+scheduler could not run it. Reading processes owned by another user can require
+root, depending on `/proc` mount and ptrace restrictions.
+
+This is currently CPU attribution only. System and cgroup PSI cannot be
+filtered directly by PID or UID, and Graywatch does not infer per-process I/O or
+memory stalls from CPU scheduling counters. Those require separate accounting
+or eBPF collectors.
+
 Example output:
 
 ```text
