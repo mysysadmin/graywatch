@@ -20,6 +20,9 @@ struct CpuPressureEvent {
     double full_stall_percent{};
     std::string selection_kind;
     std::string selection_value;
+    bool attribution_available{};
+    double attribution_interval_seconds{};
+    double attribution_age_seconds{};
     std::size_t selected_observed_threads{};
     std::size_t selected_active_threads{};
     std::size_t selected_waiting_threads{};

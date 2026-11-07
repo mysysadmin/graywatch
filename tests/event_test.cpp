@@ -25,6 +25,9 @@ int main() {
             .full_stall_percent = 0.0,
             .selection_kind = "user",
             .selection_value = "test\"user",
+            .attribution_available = true,
+            .attribution_interval_seconds = 5.0,
+            .attribution_age_seconds = 1.0,
             .selected_observed_threads = 4,
             .selected_active_threads = 2,
             .selected_waiting_threads = 1,
@@ -50,6 +53,9 @@ int main() {
                 "backslash was not escaped");
         require(json.find("\"observed_threads\":4") != std::string::npos,
                 "observed thread count is absent");
+        require(json.find("\"attribution_age_seconds\":1.000000") !=
+                    std::string::npos,
+                "attribution age is absent");
         require(json.find("\"runnable_wait_percent\":20.000000") !=
                     std::string::npos,
                 "thread evidence is absent");

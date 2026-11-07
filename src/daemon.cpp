@@ -36,6 +36,7 @@ struct Options {
     double interval_seconds{1.0};
     std::optional<std::filesystem::path> log_path;
     std::size_t top_threads{20};
+    double task_interval_seconds{5.0};
 };
 
 struct Client {
@@ -71,6 +72,9 @@ Options parse_options(int argc, char** argv) {
             if (consumed != value.size() || options.top_threads == 0) {
                 throw std::invalid_argument("--top must be positive");
             }
+        } else if (argument == "--task-interval" && index + 1 < argc) {
+            options.task_interval_seconds =
+                positive_double(argv[++index], "--task-interval");
         } else {
             throw std::invalid_argument("unknown or incomplete option: " +
                                         std::string(argument));
@@ -171,7 +175,8 @@ graywatch::CpuPressureEvent make_event(
     const std::vector<graywatch::PsiInterval>& pressure,
     const std::vector<graywatch::TaskInterval>& tasks,
     std::size_t observed_threads, std::size_t top_threads, double elapsed,
-    bool psi_available) {
+    bool psi_available, bool attribution_available,
+    double attribution_interval, double attribution_age) {
     double some{};
     double full{};
     for (const auto& interval : pressure) {
@@ -207,6 +212,9 @@ graywatch::CpuPressureEvent make_event(
         .full_stall_percent = full,
         .selection_kind = "system",
         .selection_value = "all",
+        .attribution_available = attribution_available,
+        .attribution_interval_seconds = attribution_interval,
+        .attribution_age_seconds = attribution_age,
         .selected_observed_threads = observed_threads,
         .selected_active_threads = static_cast<std::size_t>(active_threads),
         .selected_waiting_threads = static_cast<std::size_t>(waiting_threads),
@@ -264,8 +272,17 @@ int main(int argc, char** argv) {
         auto previous = read_available_psi();
         const bool psi_available = !previous.empty();
         auto previous_tasks = graywatch::read_system_tasks();
+        std::vector<graywatch::TaskInterval> latest_task_intervals;
+        std::size_t observed_threads = previous_tasks.size();
+        bool attribution_available = false;
+        double attribution_elapsed{};
         auto previous_block = graywatch::read_block_devices();
         auto previous_time = std::chrono::steady_clock::now();
+        auto previous_task_time = previous_time;
+        auto latest_task_time = previous_time;
+        auto next_task_sample = previous_time +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(options.task_interval_seconds));
         auto next_sample = previous_time +
                            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                                std::chrono::duration<double>(options.interval_seconds));
@@ -346,18 +363,38 @@ int main(int argc, char** argv) {
             const auto sample_time = std::chrono::steady_clock::now();
             if (sample_time >= next_sample) {
                 const auto current = read_available_psi();
-                const auto current_tasks = graywatch::read_system_tasks();
                 const auto current_block = graywatch::read_block_devices();
                 const double elapsed = std::chrono::duration<double>(
                                            sample_time - previous_time)
                                            .count();
                 const auto pressure = graywatch::calculate_psi_intervals(
                     previous, current, elapsed);
+                if (sample_time >= next_task_sample) {
+                    const auto current_tasks = graywatch::read_system_tasks();
+                    attribution_elapsed = std::chrono::duration<double>(
+                                              sample_time - previous_task_time)
+                                              .count();
+                    latest_task_intervals = graywatch::calculate_task_intervals(
+                        previous_tasks, current_tasks);
+                    previous_tasks = current_tasks;
+                    observed_threads = current_tasks.size();
+                    previous_task_time = sample_time;
+                    latest_task_time = sample_time;
+                    attribution_available = true;
+                    next_task_sample = sample_time +
+                        std::chrono::duration_cast<
+                            std::chrono::steady_clock::duration>(
+                            std::chrono::duration<double>(
+                                options.task_interval_seconds));
+                }
+                const double attribution_age = attribution_available
+                    ? std::chrono::duration<double>(sample_time - latest_task_time).count()
+                    : 0.0;
                 const auto event = make_event(
                     pressure,
-                    graywatch::calculate_task_intervals(previous_tasks, current_tasks),
-                    current_tasks.size(), options.top_threads, elapsed,
-                    psi_available);
+                    latest_task_intervals, observed_threads, options.top_threads,
+                    elapsed, psi_available, attribution_available,
+                    attribution_elapsed, attribution_age);
                 current_event = graywatch::to_json(event);
                 if (log) {
                     log << *current_event << '\n' << std::flush;
@@ -405,7 +442,6 @@ int main(int argc, char** argv) {
                                              }),
                               clients.end());
                 previous = current;
-                previous_tasks = current_tasks;
                 previous_block = current_block;
                 previous_time = sample_time;
                 next_sample = sample_time +

@@ -212,6 +212,10 @@ uses `/run`, not `/tmp`.
 - `selection` says whether evidence represents the whole system, a PID, or a
   user. Daemon events currently use `system/all`.
 - `selection.observed_threads` is the number of readable threads sampled.
+- `selection.attribution_interval_seconds` is the interval covered by task
+  deltas, and `attribution_age_seconds` says how old that evidence is. Resource
+  sampling remains one second while task attribution defaults to five seconds
+  to bound `/proc` scanning overhead.
 - `selection.active_threads` counts sampled threads that ran or waited during
   the interval; `waiting_threads` counts those with run-queue delay.
 - `affected_threads` contains the highest absolute run-queue waits first. The
