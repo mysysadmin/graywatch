@@ -44,7 +44,7 @@ static __always_inline struct io_stats *get_stats(struct io_key *key) {
     return bpf_map_lookup_elem(&statistics, key);
 }
 
-SEC("fentry/blk_account_io_start")
+SEC("fentry/blk_mq_start_request")
 int BPF_PROG(account_start, struct request___local *request) {
     const __u64 pointer = (__u64)request;
     const unsigned int flags = BPF_CORE_READ(request, cmd_flags);

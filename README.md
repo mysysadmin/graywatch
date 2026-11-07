@@ -127,6 +127,22 @@ PSI or eBPF. Their severity is device busy fraction and their condition is
 `active` or `idle`; neither should be interpreted as degradation. Later eBPF
 latency events use separate conditions and evidence.
 
+## eBPF block service latency prototype
+
+Build the optional collector after initializing submodules:
+
+```sh
+git submodule update --init --recursive
+make -C bpf -j
+sudo ./bpf/.output/graywatch-biolatency --interval 1
+```
+
+It correlates `blk_mq_start_request` with `blk_mq_end_request` by request pointer
+and reports per-device, per-operation interval counts, bytes, average service
+latency, logarithmic p50/p95/p99 upper bounds, and errors. This is dispatch-to-
+completion service latency; it intentionally excludes scheduler queue time.
+The portable `/sys/block` metrics remain the queue-inclusive companion signal.
+
 ### Install with systemd
 
 ```sh
