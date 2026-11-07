@@ -2,6 +2,7 @@
 #include "graywatch/event.hpp"
 #include "graywatch/psi.hpp"
 #include "graywatch/task_stats.hpp"
+#include "graywatch/user_lookup.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -14,7 +15,6 @@
 #include <iostream>
 #include <map>
 #include <optional>
-#include <pwd.h>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
@@ -110,11 +110,11 @@ TaskOptions parse_task_options(int argc, char** argv) {
             options.selection_value = pid_text;
         } else if (argument == "-u" && index + 1 < argc) {
             const std::string user(argv[++index]);
-            const passwd* entry = getpwnam(user.c_str());
-            if (entry == nullptr) {
+            const auto uid = graywatch::resolve_local_uid(user);
+            if (!uid) {
                 throw std::invalid_argument("unknown user: " + user);
             }
-            options.uid = entry->pw_uid;
+            options.uid = *uid;
             options.selection_kind = "user";
             options.selection_value = user;
         } else if (argument == "--interval" && index + 1 < argc) {

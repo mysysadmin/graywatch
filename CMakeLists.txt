@@ -17,6 +17,7 @@ add_library(graywatch_core
     src/network_stats.cpp
     src/psi.cpp
     src/task_stats.cpp
+    src/user_lookup.cpp
 )
 target_include_directories(graywatch_core PUBLIC include)
 target_compile_options(graywatch_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -98,4 +99,9 @@ if(BUILD_TESTING)
     target_link_libraries(network_stats_test PRIVATE graywatch_core)
     target_compile_options(network_stats_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME network_stats COMMAND network_stats_test)
+
+    add_executable(user_lookup_test tests/user_lookup_test.cpp)
+    target_link_libraries(user_lookup_test PRIVATE graywatch_core)
+    target_compile_options(user_lookup_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME user_lookup COMMAND user_lookup_test)
 endif()

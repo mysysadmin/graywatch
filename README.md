@@ -131,6 +131,7 @@ Inspect CPU scheduling delay for one process or all processes owned by a user:
 ```sh
 ./build/graywatchctl tasks -p 1234 --interval 1
 ./build/graywatchctl tasks -u postgres --interval 1 --top 20
+./build/graywatchctl tasks -u 1001 --interval 1 --top 20
 ```
 
 This command samples Linux `schedstat` counters for every selected thread. Its
@@ -139,6 +140,9 @@ time spent sleeping voluntarily is excluded. A busy thread with a low value is
 receiving CPU efficiently, while a high value means it was runnable but the
 scheduler could not run it. Reading processes owned by another user can require
 root, depending on `/proc` mount and ptrace restrictions.
+User names are resolved from the target machine's local `/etc/passwd`; numeric
+UIDs are accepted directly. Network identity services are intentionally not
+queried, which keeps the portable client independent of glibc NSS modules.
 
 This is scheduler and blocked-state attribution, not complete per-process I/O
 or memory accounting. System and cgroup PSI cannot be filtered directly by PID
