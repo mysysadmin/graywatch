@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(graywatch_core
+    src/block_stats.cpp
     src/detector.cpp
     src/event.cpp
     src/psi.cpp
@@ -51,6 +52,11 @@ install(FILES README.md LICENSE
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(block_stats_test tests/block_stats_test.cpp)
+    target_link_libraries(block_stats_test PRIVATE graywatch_core)
+    target_compile_options(block_stats_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME block_stats COMMAND block_stats_test)
+
     add_executable(psi_test tests/psi_test.cpp)
     target_link_libraries(psi_test PRIVATE graywatch_core)
     target_compile_options(psi_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
