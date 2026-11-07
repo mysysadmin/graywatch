@@ -1,5 +1,6 @@
 #include "graywatch/event.hpp"
 #include "graywatch/psi.hpp"
+#include "graywatch/task_stats.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -33,6 +34,7 @@ struct Options {
     std::filesystem::path socket_path{"/run/graywatch/graywatchd.sock"};
     double interval_seconds{1.0};
     std::optional<std::filesystem::path> log_path;
+    std::size_t top_threads{20};
 };
 
 struct Client {
@@ -61,6 +63,13 @@ Options parse_options(int argc, char** argv) {
             options.interval_seconds = positive_double(argv[++index], "--interval");
         } else if (argument == "--log" && index + 1 < argc) {
             options.log_path = argv[++index];
+        } else if (argument == "--top" && index + 1 < argc) {
+            std::size_t consumed{};
+            const std::string value(argv[++index]);
+            options.top_threads = std::stoul(value, &consumed);
+            if (consumed != value.size() || options.top_threads == 0) {
+                throw std::invalid_argument("--top must be positive");
+            }
         } else {
             throw std::invalid_argument("unknown or incomplete option: " +
                                         std::string(argument));
@@ -153,7 +162,9 @@ void handle_command(Client& client, std::string_view command,
 }
 
 graywatch::CpuPressureEvent make_event(
-    const std::vector<graywatch::PsiInterval>& pressure, double elapsed) {
+    const std::vector<graywatch::PsiInterval>& pressure,
+    const std::vector<graywatch::TaskInterval>& tasks,
+    std::size_t observed_threads, std::size_t top_threads, double elapsed) {
     double some{};
     double full{};
     for (const auto& interval : pressure) {
@@ -161,6 +172,23 @@ graywatch::CpuPressureEvent make_event(
             some = interval.stall_percent;
         } else if (interval.resource == "cpu" && interval.scope == "full") {
             full = interval.stall_percent;
+        }
+    }
+    const auto active_threads = std::count_if(
+        tasks.begin(), tasks.end(), [](const auto& task) {
+            return task.runtime_ns != 0 || task.runqueue_wait_ns != 0;
+        });
+    const auto waiting_threads = std::count_if(
+        tasks.begin(), tasks.end(), [](const auto& task) {
+            return task.runqueue_wait_ns != 0;
+        });
+    std::vector<graywatch::TaskInterval> affected;
+    for (const auto& task : tasks) {
+        if (affected.size() >= top_threads) {
+            break;
+        }
+        if (task.runqueue_wait_ns != 0) {
+            affected.push_back(task);
         }
     }
     return {
@@ -171,9 +199,10 @@ graywatch::CpuPressureEvent make_event(
         .full_stall_percent = full,
         .selection_kind = "system",
         .selection_value = "all",
-        .selected_active_threads = 0,
-        .selected_waiting_threads = 0,
-        .affected_threads = {},
+        .selected_observed_threads = observed_threads,
+        .selected_active_threads = static_cast<std::size_t>(active_threads),
+        .selected_waiting_threads = static_cast<std::size_t>(waiting_threads),
+        .affected_threads = std::move(affected),
     };
 }
 
@@ -205,6 +234,7 @@ int main(int argc, char** argv) {
         std::vector<Client> clients;
         std::optional<std::string> current_event;
         auto previous = graywatch::read_system_psi();
+        auto previous_tasks = graywatch::read_system_tasks();
         auto previous_time = std::chrono::steady_clock::now();
         auto next_sample = previous_time +
                            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -285,12 +315,14 @@ int main(int argc, char** argv) {
             const auto sample_time = std::chrono::steady_clock::now();
             if (sample_time >= next_sample) {
                 const auto current = graywatch::read_system_psi();
+                const auto current_tasks = graywatch::read_system_tasks();
                 const double elapsed = std::chrono::duration<double>(
                                            sample_time - previous_time)
                                            .count();
                 const auto event = make_event(
                     graywatch::calculate_psi_intervals(previous, current, elapsed),
-                    elapsed);
+                    graywatch::calculate_task_intervals(previous_tasks, current_tasks),
+                    current_tasks.size(), options.top_threads, elapsed);
                 current_event = graywatch::to_json(event);
                 if (log) {
                     log << *current_event << '\n' << std::flush;
@@ -308,6 +340,7 @@ int main(int argc, char** argv) {
                                              }),
                               clients.end());
                 previous = current;
+                previous_tasks = current_tasks;
                 previous_time = sample_time;
                 next_sample = sample_time +
                               std::chrono::duration_cast<

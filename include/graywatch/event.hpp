@@ -18,6 +18,7 @@ struct CpuPressureEvent {
     double full_stall_percent{};
     std::string selection_kind;
     std::string selection_value;
+    std::size_t selected_observed_threads{};
     std::size_t selected_active_threads{};
     std::size_t selected_waiting_threads{};
     std::vector<TaskInterval> affected_threads;

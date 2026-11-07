@@ -183,8 +183,17 @@ uses `/run`, not `/tmp`.
   cgroup-scoped CPU pressure.
 - `selection` says whether evidence represents the whole system, a PID, or a
   user. Daemon events currently use `system/all`.
-- `affected_threads` contains task evidence when attribution was requested;
-  system-only daemon events currently leave it empty.
+- `selection.observed_threads` is the number of readable threads sampled.
+- `selection.active_threads` counts sampled threads that ran or waited during
+  the interval; `waiting_threads` counts those with run-queue delay.
+- `affected_threads` contains the highest absolute run-queue waits first. The
+  daemon includes at most `--top N` entries (default 20), while the counts still
+  describe all observed threads.
+
+System attribution depends on `/proc` visibility. With `hidepid` or an LSM
+policy, the unprivileged service may observe only a subset of tasks. The
+`observed_threads` value makes coverage visible but cannot count processes that
+the kernel hides completely.
 
 For example, severity `0.86` does not mean CPUs were 86% utilized. It means
 there was unsatisfied runnable CPU demand during 86% of that interval.

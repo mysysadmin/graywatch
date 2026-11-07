@@ -38,6 +38,8 @@ std::vector<TaskSample> read_process_tasks(
     int pid, const std::filesystem::path& proc_root = "/proc");
 std::vector<TaskSample> read_user_tasks(
     unsigned int uid, const std::filesystem::path& proc_root = "/proc");
+std::vector<TaskSample> read_system_tasks(
+    const std::filesystem::path& proc_root = "/proc");
 std::vector<TaskInterval> calculate_task_intervals(
     const std::vector<TaskSample>& previous,
     const std::vector<TaskSample>& current);

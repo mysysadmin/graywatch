@@ -24,6 +24,7 @@ int main() {
             .full_stall_percent = 0.0,
             .selection_kind = "user",
             .selection_value = "test\"user",
+            .selected_observed_threads = 4,
             .selected_active_threads = 2,
             .selected_waiting_threads = 1,
             .affected_threads = {{
@@ -46,6 +47,8 @@ int main() {
                 "quote was not escaped");
         require(json.find("worker\\\\one") != std::string::npos,
                 "backslash was not escaped");
+        require(json.find("\"observed_threads\":4") != std::string::npos,
+                "observed thread count is absent");
         require(json.find("\"runnable_wait_percent\":20.000000") !=
                     std::string::npos,
                 "thread evidence is absent");

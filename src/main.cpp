@@ -427,6 +427,7 @@ void tasks(const TaskOptions& options) {
             .full_stall_percent = cpu_full_percent,
             .selection_kind = options.selection_kind,
             .selection_value = options.selection_value,
+            .selected_observed_threads = current.size(),
             .selected_active_threads = static_cast<std::size_t>(active_threads),
             .selected_waiting_threads = static_cast<std::size_t>(waiting_threads),
             .affected_threads = std::move(affected),

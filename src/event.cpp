@@ -84,7 +84,8 @@ std::string to_json(const CpuPressureEvent& event) {
     json_string(output, event.selection_kind);
     output << ",\"value\":";
     json_string(output, event.selection_value);
-    output << ",\"active_threads\":" << event.selected_active_threads
+    output << ",\"observed_threads\":" << event.selected_observed_threads
+           << ",\"active_threads\":" << event.selected_active_threads
            << ",\"waiting_threads\":" << event.selected_waiting_threads
            << "},\"affected_threads\":[";
 

@@ -150,6 +150,26 @@ std::vector<TaskSample> read_user_tasks(unsigned int uid,
     return samples;
 }
 
+std::vector<TaskSample> read_system_tasks(const std::filesystem::path& proc_root) {
+    std::vector<TaskSample> samples;
+    std::error_code error;
+    std::filesystem::directory_iterator processes(proc_root, error);
+    if (error) {
+        return samples;
+    }
+    for (const auto& entry : processes) {
+        const auto pid = numeric_name(entry.path());
+        if (!pid) {
+            continue;
+        }
+        auto process_samples = read_process_tasks(*pid, proc_root);
+        samples.insert(samples.end(),
+                       std::make_move_iterator(process_samples.begin()),
+                       std::make_move_iterator(process_samples.end()));
+    }
+    return samples;
+}
+
 std::vector<TaskInterval> calculate_task_intervals(
     const std::vector<TaskSample>& previous,
     const std::vector<TaskSample>& current) {
