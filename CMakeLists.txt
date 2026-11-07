@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(graywatch VERSION 0.1.0 LANGUAGES CXX)
 
+include(GNUInstallDirs)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -21,6 +23,31 @@ target_compile_options(graywatchctl PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_executable(graywatchd src/daemon.cpp)
 target_link_libraries(graywatchd PRIVATE graywatch_core)
 target_compile_options(graywatchd PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+install(TARGETS graywatchctl
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(TARGETS graywatchd
+    RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
+)
+install(TARGETS graywatch_core
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+install(DIRECTORY include/graywatch
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+set(GRAYWATCH_SYSTEMD_UNIT_DIR "lib/systemd/system"
+    CACHE PATH "systemd system unit installation directory")
+set(GRAYWATCH_SYSUSERS_DIR "lib/sysusers.d"
+    CACHE PATH "systemd-sysusers configuration directory")
+configure_file(packaging/graywatchd.service.in graywatchd.service @ONLY)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/graywatchd.service"
+    DESTINATION "${GRAYWATCH_SYSTEMD_UNIT_DIR}")
+install(FILES packaging/graywatch.conf
+    DESTINATION "${GRAYWATCH_SYSUSERS_DIR}")
+install(FILES README.md LICENSE
+    DESTINATION "${CMAKE_INSTALL_DOCDIR}")
 
 include(CTest)
 if(BUILD_TESTING)

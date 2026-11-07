@@ -1,0 +1,31 @@
+[Unit]
+Description=Graywatch Linux degradation detector
+Documentation=file://@CMAKE_INSTALL_FULL_DOCDIR@/README.md
+After=local-fs.target
+
+[Service]
+Type=simple
+User=graywatch
+Group=graywatch
+RuntimeDirectory=graywatch
+RuntimeDirectoryMode=0750
+LogsDirectory=graywatch
+LogsDirectoryMode=0750
+ExecStart=@CMAKE_INSTALL_FULL_SBINDIR@/graywatchd --socket /run/graywatch/graywatchd.sock --log /var/log/graywatch/events.jsonl
+Restart=on-failure
+RestartSec=2s
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

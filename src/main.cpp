@@ -139,7 +139,7 @@ TaskOptions parse_task_options(int argc, char** argv) {
 }
 
 struct DaemonOptions {
-    std::filesystem::path socket_path{"/run/graywatchd.sock"};
+    std::filesystem::path socket_path{"/run/graywatch/graywatchd.sock"};
     double minimum_severity{};
     unsigned int count{};
 };

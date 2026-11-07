@@ -16,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <vector>
@@ -29,7 +30,7 @@ void stop(int) {
 }
 
 struct Options {
-    std::filesystem::path socket_path{"/run/graywatchd.sock"};
+    std::filesystem::path socket_path{"/run/graywatch/graywatchd.sock"};
     double interval_seconds{1.0};
     std::optional<std::filesystem::path> log_path;
 };
@@ -85,6 +86,13 @@ int create_listener(const std::filesystem::path& path) {
         const std::string message = std::strerror(errno);
         close(fd);
         throw std::runtime_error("bind " + path_text + ": " + message);
+    }
+    if (chmod(path_text.c_str(), 0660) < 0) {
+        const std::string message = std::strerror(errno);
+        close(fd);
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+        throw std::runtime_error("chmod " + path_text + ": " + message);
     }
     if (listen(fd, 16) < 0) {
         const std::string message = std::strerror(errno);

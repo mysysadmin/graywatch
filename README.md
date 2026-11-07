@@ -120,6 +120,75 @@ and prints future events whose severity is at least the requested value. Add
 to replace an existing socket path, preventing it from unlinking another live
 service accidentally.
 
+### Install with systemd
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/usr
+cmake --build build
+sudo cmake --install build
+sudo systemd-sysusers
+sudo systemctl daemon-reload
+sudo systemctl enable --now graywatchd
+```
+
+The service creates `/run/graywatch` and `/var/log/graywatch` with systemd's
+`RuntimeDirectory` and `LogsDirectory` features. The socket is mode `0660`,
+owned by `graywatch:graywatch`. Add an application account to the `graywatch`
+group when it should be allowed to query or subscribe, then refresh that
+application's login or service credentials.
+
+The default paths are:
+
+```text
+/run/graywatch/graywatchd.sock
+/var/log/graywatch/events.jsonl
+```
+
+`noexec`, `nodev`, and `nosuid` mount options do not prevent Unix socket
+creation. Socket creation can fail when the filesystem is read-only, the daemon
+lacks directory write/search permission, the path already exists or is too
+long, the filesystem has no free inodes, the filesystem does not support Unix
+sockets, or an SELinux/AppArmor policy denies the operation. `/run` is normally
+a tmpfs that supports Unix sockets. `PrivateTmp=yes` is safe because Graywatch
+uses `/run`, not `/tmp`.
+
+### Reading an event
+
+```json
+{
+  "schema_version": 1,
+  "event_type": "resource_pressure",
+  "resource": "cpu",
+  "condition": "pressure",
+  "severity": 0.86,
+  "interval_seconds": 1.0,
+  "evidence": {
+    "psi_some_stall_percent": 86.0,
+    "psi_full_stall_percent": 0.0
+  }
+}
+```
+
+- `schema_version` defines the compatibility contract for consumers.
+- `condition=pressure` means the CPU PSI `some` counter advanced during the
+  interval; it does not by itself mean the machine is unhealthy.
+- `severity=0.86` means that during 86% of the interval at least one runnable
+  task was waiting for CPU. It is a direct measurement, not a baseline score.
+- `interval_seconds` is the actual monotonic-clock sampling duration.
+- `psi_some_stall_percent` is the percentage of interval time with one or more
+  tasks waiting for CPU.
+- `psi_full_stall_percent` is the percentage with all non-idle work stalled.
+  System-level CPU `full` is normally zero on Linux; it is more useful for
+  cgroup-scoped CPU pressure.
+- `selection` says whether evidence represents the whole system, a PID, or a
+  user. Daemon events currently use `system/all`.
+- `affected_threads` contains task evidence when attribution was requested;
+  system-only daemon events currently leave it empty.
+
+For example, severity `0.86` does not mean CPUs were 86% utilized. It means
+there was unsatisfied runnable CPU demand during 86% of that interval.
+
 Example output:
 
 ```text
