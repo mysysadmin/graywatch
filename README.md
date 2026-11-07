@@ -28,6 +28,16 @@ Read the current PSI snapshot:
 ./build/graywatchctl psi
 ```
 
+Measure interval stall percentages once per second, for five samples:
+
+```sh
+./build/graywatchctl psi --watch --interval 1 --count 5
+```
+
+Omit `--count` to continue until interrupted. Interval percentages are derived
+from the kernel's cumulative microsecond counters, so unlike `avg10`, `avg60`,
+and `avg300`, they represent exactly the interval Graywatch sampled.
+
 Example output:
 
 ```text

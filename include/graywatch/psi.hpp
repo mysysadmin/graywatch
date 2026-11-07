@@ -17,10 +17,22 @@ struct PsiSample {
     std::uint64_t total_us{};
 };
 
+struct PsiInterval {
+    std::string resource;
+    std::string scope;
+    std::uint64_t stalled_us{};
+    double elapsed_seconds{};
+    double stall_percent{};
+};
+
 PsiSample parse_psi_line(std::string_view resource, std::string_view line);
 std::vector<PsiSample> read_psi_file(std::string_view resource,
                                      const std::filesystem::path& path);
 std::vector<PsiSample> read_system_psi(
     const std::filesystem::path& pressure_root = "/proc/pressure");
+std::vector<PsiInterval> calculate_psi_intervals(
+    const std::vector<PsiSample>& previous,
+    const std::vector<PsiSample>& current,
+    double elapsed_seconds);
 
 }  // namespace graywatch

@@ -1,8 +1,10 @@
 #include "graywatch/psi.hpp"
 
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace graywatch {
 namespace {
@@ -61,6 +63,44 @@ std::vector<PsiSample> read_system_psi(const std::filesystem::path& pressure_roo
         result.insert(result.end(), samples.begin(), samples.end());
     }
     return result;
+}
+
+std::vector<PsiInterval> calculate_psi_intervals(
+    const std::vector<PsiSample>& previous,
+    const std::vector<PsiSample>& current,
+    double elapsed_seconds) {
+    if (elapsed_seconds <= 0.0) {
+        throw std::invalid_argument("PSI interval duration must be positive");
+    }
+
+    using Key = std::pair<std::string, std::string>;
+    std::map<Key, std::uint64_t> previous_totals;
+    for (const auto& sample : previous) {
+        previous_totals[{sample.resource, sample.scope}] = sample.total_us;
+    }
+
+    std::vector<PsiInterval> intervals;
+    for (const auto& sample : current) {
+        const auto found = previous_totals.find({sample.resource, sample.scope});
+        if (found == previous_totals.end()) {
+            continue;
+        }
+        if (sample.total_us < found->second) {
+            throw std::runtime_error("PSI total counter moved backwards for " +
+                                     sample.resource + " " + sample.scope);
+        }
+
+        const auto stalled_us = sample.total_us - found->second;
+        const auto elapsed_us = elapsed_seconds * 1'000'000.0;
+        intervals.push_back(PsiInterval{
+            .resource = sample.resource,
+            .scope = sample.scope,
+            .stalled_us = stalled_us,
+            .elapsed_seconds = elapsed_seconds,
+            .stall_percent = (static_cast<double>(stalled_us) / elapsed_us) * 100.0,
+        });
+    }
+    return intervals;
 }
 
 }  // namespace graywatch
