@@ -1,9 +1,11 @@
+#include "graywatch/detector.hpp"
 #include "graywatch/psi.hpp"
 
 #include <chrono>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
@@ -17,7 +19,10 @@ struct Options {
 };
 
 void usage() {
-    std::cerr << "usage: graywatchctl psi [--watch] [--interval SECONDS] "
+    std::cerr << "usage:\n"
+                 "  graywatchctl psi [--watch] [--interval SECONDS] "
+                 "[--count SAMPLES]\n"
+                 "  graywatchctl health [--interval SECONDS] "
                  "[--count SAMPLES]\n";
 }
 
@@ -39,11 +44,12 @@ unsigned int parse_positive_unsigned(const char* text, std::string_view option) 
     return static_cast<unsigned int>(value);
 }
 
-Options parse_options(int argc, char** argv) {
+Options parse_options(int argc, char** argv, bool health_command) {
     Options options;
+    options.watch = health_command;
     for (int index = 2; index < argc; ++index) {
         const std::string_view argument(argv[index]);
-        if (argument == "--watch") {
+        if (argument == "--watch" && !health_command) {
             options.watch = true;
         } else if (argument == "--interval" && index + 1 < argc) {
             options.interval_seconds =
@@ -99,18 +105,71 @@ void watch(const Options& options) {
     }
 }
 
+void health(const Options& options) {
+    using Clock = std::chrono::steady_clock;
+    using Key = std::pair<std::string, std::string>;
+    std::map<Key, graywatch::RollingDetector> detectors;
+    auto previous = graywatch::read_system_psi();
+    auto previous_time = Clock::now();
+    unsigned int emitted{};
+
+    const auto sleep_duration = std::chrono::duration<double>(options.interval_seconds);
+    while (options.count == 0 || emitted < options.count) {
+        std::this_thread::sleep_for(sleep_duration);
+        const auto current_time = Clock::now();
+        const auto current = graywatch::read_system_psi();
+        const double elapsed =
+            std::chrono::duration<double>(current_time - previous_time).count();
+
+        for (const auto& interval :
+             graywatch::calculate_psi_intervals(previous, current, elapsed)) {
+            auto [position, inserted] = detectors.try_emplace(
+                Key{interval.resource, interval.scope});
+            (void)inserted;
+            const auto detection = position->second.observe(interval.stall_percent);
+            std::cout << interval.resource << ' ' << interval.scope
+                      << " state=" << graywatch::to_string(detection.state)
+                      << " current=" << detection.current
+                      << " baseline_mean=" << detection.baseline_mean
+                      << " baseline_stddev=" << detection.baseline_stddev
+                      << " threshold=" << detection.threshold
+                      << " samples=" << detection.baseline_samples;
+            if (detection.anomalous) {
+                std::cout << " anomalous=yes z_score=" << detection.z_score;
+            }
+            if (detection.changed) {
+                std::cout << " transition="
+                          << graywatch::to_string(detection.previous_state) << "->"
+                          << graywatch::to_string(detection.state);
+            }
+            std::cout << '\n';
+        }
+        std::cout << "---\n" << std::flush;
+        previous = current;
+        previous_time = current_time;
+        ++emitted;
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2 || std::string_view(argv[1]) != "psi") {
+    if (argc < 2) {
         usage();
         return 2;
     }
 
     try {
-        const auto options = parse_options(argc, argv);
+        const std::string_view command(argv[1]);
+        if (command != "psi" && command != "health") {
+            throw std::invalid_argument("unknown command: " + std::string(command));
+        }
+        const bool health_command = command == "health";
+        const auto options = parse_options(argc, argv, health_command);
         std::cout << std::fixed << std::setprecision(2);
-        if (options.watch) {
+        if (health_command) {
+            health(options);
+        } else if (options.watch) {
             watch(options);
         } else {
             print_snapshot(graywatch::read_system_psi());

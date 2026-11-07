@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(graywatch_core
+    src/detector.cpp
     src/psi.cpp
 )
 target_include_directories(graywatch_core PUBLIC include)
@@ -21,4 +22,9 @@ if(BUILD_TESTING)
     target_link_libraries(psi_test PRIVATE graywatch_core)
     target_compile_options(psi_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME psi_parser COMMAND psi_test)
+
+    add_executable(detector_test tests/detector_test.cpp)
+    target_link_libraries(detector_test PRIVATE graywatch_core)
+    target_compile_options(detector_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME degradation_detector COMMAND detector_test)
 endif()

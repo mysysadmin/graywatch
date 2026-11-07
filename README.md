@@ -38,6 +38,23 @@ Omit `--count` to continue until interrupted. Interval percentages are derived
 from the kernel's cumulative microsecond counters, so unlike `avg10`, `avg60`,
 and `avg300`, they represent exactly the interval Graywatch sampled.
 
+Run the first adaptive health detector:
+
+```sh
+./build/graywatchctl health --interval 1 --count 20
+```
+
+Each `(resource, scope)` stream learns independently. The initial state is
+`LEARNING`; after ten samples it becomes `NORMAL`. A sample is provisionally
+anomalous when it exceeds the rolling mean by three standard deviations, and
+three consecutive anomalies produce `DEGRADED`. Three normal observations are
+required for recovery. Candidate anomalies and degraded observations are not
+added to the baseline.
+
+These statistical parameters are intentionally detector configuration, not
+resource-specific operational thresholds. They are provisional and remain
+visible in the output so their behavior can be evaluated rather than assumed.
+
 Example output:
 
 ```text
