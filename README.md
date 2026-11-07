@@ -236,6 +236,21 @@ the kernel hides completely.
 For example, severity `0.86` does not mean CPUs were 86% utilized. It means
 there was unsatisfied runnable CPU demand during 86% of that interval.
 
+### Multi-node support snapshot
+
+The repository includes a stateless support helper that queries each node over
+SSH in parallel; it does not install a central service or retain metrics:
+
+```sh
+python3 tools/graywatch-cluster-status.py \
+  root@nodea root@nodeb root@nodec root@noded
+```
+
+It summarizes PSI availability, waiting-thread counts, the thread with the
+largest absolute scheduler wait, and the busiest active block device. Add
+`--json` when the snapshot should be attached to a support case or processed by
+another tool.
+
 Example output:
 
 ```text
