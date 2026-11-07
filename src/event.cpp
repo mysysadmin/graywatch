@@ -1,5 +1,6 @@
 #include "graywatch/event.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <ctime>
 #include <iomanip>
@@ -74,10 +75,14 @@ std::string to_json(const CpuPressureEvent& event) {
            << ",\"event_type\":\"resource_pressure\",\"timestamp\":";
     json_string(output, event.timestamp);
     output << ",\"resource\":\"cpu\",\"condition\":\""
-           << (event.some_stall_percent == 0.0 ? "no_pressure" : "pressure")
+           << (!event.psi_available
+                   ? "unavailable"
+                   : (event.some_stall_percent == 0.0 ? "no_pressure" : "pressure"))
            << "\",\"severity\":" << event.severity
            << ",\"interval_seconds\":" << event.interval_seconds
-           << ",\"evidence\":{\"psi_some_stall_percent\":"
+           << ",\"evidence\":{\"psi_available\":"
+           << (event.psi_available ? "true" : "false")
+           << ",\"psi_some_stall_percent\":"
            << event.some_stall_percent
            << ",\"psi_full_stall_percent\":" << event.full_stall_percent
            << "},\"selection\":{\"kind\":";
@@ -107,6 +112,60 @@ std::string to_json(const CpuPressureEvent& event) {
                << ",\"timeslices\":" << thread.timeslices << '}';
     }
     output << "]}";
+    return output.str();
+}
+
+std::string to_json(const IoDeviceEvent& event) {
+    const auto& device = event.device;
+    const double severity = std::clamp(device.busy_percent / 100.0, 0.0, 1.0);
+    const bool active = device.read_iops != 0.0 || device.write_iops != 0.0 ||
+                        device.discard_iops != 0.0 || device.flush_iops != 0.0;
+    std::ostringstream output;
+    output << std::fixed << std::setprecision(6)
+           << "{\"schema_version\":" << IoDeviceEvent::schema_version
+           << ",\"event_type\":\"resource_activity\",\"timestamp\":";
+    json_string(output, event.timestamp);
+    output << ",\"resource\":\"io\",\"condition\":\""
+           << (active ? "active" : "idle") << "\",\"severity\":" << severity
+           << ",\"interval_seconds\":" << event.interval_seconds
+           << ",\"device\":{\"name\":";
+    json_string(output, device.name);
+    output << ",\"major\":" << device.major << ",\"minor\":" << device.minor
+           << ",\"model\":";
+    json_string(output, device.model);
+    output << "},\"evidence\":{\"source\":\"sysfs_block_stat\""
+           << ",\"read_iops\":" << device.read_iops
+           << ",\"write_iops\":" << device.write_iops
+           << ",\"discard_iops\":" << device.discard_iops
+           << ",\"flush_iops\":" << device.flush_iops
+           << ",\"read_bytes_per_second\":" << device.read_bytes_per_second
+           << ",\"write_bytes_per_second\":" << device.write_bytes_per_second
+           << ",\"average_read_latency_ms\":"
+           << device.average_read_latency_ms
+           << ",\"average_write_latency_ms\":"
+           << device.average_write_latency_ms
+           << ",\"average_discard_latency_ms\":"
+           << device.average_discard_latency_ms
+           << ",\"average_flush_latency_ms\":"
+           << device.average_flush_latency_ms
+           << ",\"busy_percent\":" << device.busy_percent
+           << ",\"average_queue_depth\":" << device.average_queue_depth
+           << ",\"io_in_progress\":" << device.io_in_progress
+           << ",\"psi_available\":" << (event.psi_available ? "true" : "false")
+           << ",\"psi_some_stall_percent\":" << event.psi_some_stall_percent
+           << ",\"psi_full_stall_percent\":" << event.psi_full_stall_percent
+           << "}}";
+    return output.str();
+}
+
+std::string json_array(const std::vector<std::string>& values) {
+    std::ostringstream output;
+    output << '[';
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (index != 0) output << ',';
+        output << values[index];
+    }
+    output << ']';
     return output.str();
 }
 

@@ -19,6 +19,7 @@ int main() {
         const graywatch::CpuPressureEvent event{
             .timestamp = "2026-11-06T12:34:56.789Z",
             .interval_seconds = 1.0,
+            .psi_available = true,
             .severity = 0.75,
             .some_stall_percent = 75.0,
             .full_stall_percent = 0.0,
@@ -52,6 +53,26 @@ int main() {
         require(json.find("\"runnable_wait_percent\":20.000000") !=
                     std::string::npos,
                 "thread evidence is absent");
+
+        const graywatch::IoDeviceEvent io_event{
+            .timestamp = "2026-11-06T12:34:56.789Z",
+            .interval_seconds = 1.0,
+            .device = {.name = "nvme0n1", .major = 259, .minor = 0,
+                       .model = "Test NVMe", .read_iops = 100.0,
+                       .write_iops = 20.0, .average_read_latency_ms = 0.2,
+                       .busy_percent = 25.0, .average_queue_depth = 0.5,
+                       .io_in_progress = 2},
+            .psi_available = false,
+        };
+        const auto io_json = graywatch::to_json(io_event);
+        require(io_json.find("\"resource\":\"io\"") != std::string::npos,
+                "I/O resource absent");
+        require(io_json.find("\"name\":\"nvme0n1\"") != std::string::npos,
+                "device absent");
+        require(io_json.find("\"psi_available\":false") != std::string::npos,
+                "PSI availability absent");
+        require(graywatch::json_array({json, io_json}).front() == '[',
+                "JSON array not produced");
     } catch (const std::exception& error) {
         std::cerr << "event_test: " << error.what() << '\n';
         return 1;

@@ -109,6 +109,7 @@ events through a Unix-domain socket:
   --log /tmp/graywatchd.jsonl
 
 ./build/graywatchctl status --socket /tmp/graywatchd.sock
+./build/graywatchctl status --socket /tmp/graywatchd.sock --resource io
 ./build/graywatchctl subscribe --socket /tmp/graywatchd.sock \
   --min-severity 0.10
 ```
@@ -119,6 +120,12 @@ and prints future events whose severity is at least the requested value. Add
 `SUBSCRIBE <minimum-severity>` as newline-delimited commands. The daemon refuses
 to replace an existing socket path, preventing it from unlinking another live
 service accidentally.
+
+`status --resource io` returns a JSON array with one current event per block
+device. These portable events come from `/sys/block/*/stat` and work without
+PSI or eBPF. Their severity is device busy fraction and their condition is
+`active` or `idle`; neither should be interpreted as degradation. Later eBPF
+latency events use separate conditions and evidence.
 
 ### Install with systemd
 

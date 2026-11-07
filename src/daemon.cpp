@@ -1,3 +1,4 @@
+#include "graywatch/block_stats.hpp"
 #include "graywatch/event.hpp"
 #include "graywatch/psi.hpp"
 #include "graywatch/task_stats.hpp"
@@ -130,7 +131,8 @@ bool send_line(int fd, std::string_view line) {
 }
 
 void handle_command(Client& client, std::string_view command,
-                    const std::optional<std::string>& current_event) {
+                    const std::optional<std::string>& current_event,
+                    const std::vector<std::string>& current_io_events) {
     if (command == "GET") {
         if (current_event) {
             (void)send_line(client.fd, *current_event);
@@ -138,6 +140,10 @@ void handle_command(Client& client, std::string_view command,
             (void)send_line(client.fd,
                             R"({"error":"state_not_ready"})");
         }
+        return;
+    }
+    if (command == "GET io") {
+        (void)send_line(client.fd, graywatch::json_array(current_io_events));
         return;
     }
     constexpr std::string_view prefix = "SUBSCRIBE ";
@@ -164,7 +170,8 @@ void handle_command(Client& client, std::string_view command,
 graywatch::CpuPressureEvent make_event(
     const std::vector<graywatch::PsiInterval>& pressure,
     const std::vector<graywatch::TaskInterval>& tasks,
-    std::size_t observed_threads, std::size_t top_threads, double elapsed) {
+    std::size_t observed_threads, std::size_t top_threads, double elapsed,
+    bool psi_available) {
     double some{};
     double full{};
     for (const auto& interval : pressure) {
@@ -194,6 +201,7 @@ graywatch::CpuPressureEvent make_event(
     return {
         .timestamp = graywatch::current_timestamp_utc(),
         .interval_seconds = elapsed,
+        .psi_available = psi_available,
         .severity = std::clamp(some / 100.0, 0.0, 1.0),
         .some_stall_percent = some,
         .full_stall_percent = full,
@@ -204,6 +212,25 @@ graywatch::CpuPressureEvent make_event(
         .selected_waiting_threads = static_cast<std::size_t>(waiting_threads),
         .affected_threads = std::move(affected),
     };
+}
+
+std::vector<graywatch::PsiSample> read_available_psi() {
+    try {
+        return graywatch::read_system_psi();
+    } catch (const std::exception&) {
+        return {};
+    }
+}
+
+std::pair<double, double> io_psi(
+    const std::vector<graywatch::PsiInterval>& pressure) {
+    double some{};
+    double full{};
+    for (const auto& interval : pressure) {
+        if (interval.resource == "io" && interval.scope == "some") some = interval.stall_percent;
+        if (interval.resource == "io" && interval.scope == "full") full = interval.stall_percent;
+    }
+    return {some, full};
 }
 
 }  // namespace
@@ -233,8 +260,11 @@ int main(int argc, char** argv) {
 
         std::vector<Client> clients;
         std::optional<std::string> current_event;
-        auto previous = graywatch::read_system_psi();
+        std::vector<std::string> current_io_events;
+        auto previous = read_available_psi();
+        const bool psi_available = !previous.empty();
         auto previous_tasks = graywatch::read_system_tasks();
+        auto previous_block = graywatch::read_block_devices();
         auto previous_time = std::chrono::steady_clock::now();
         auto next_sample = previous_time +
                            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -303,7 +333,8 @@ int main(int argc, char** argv) {
                 while ((newline = clients[index].input.find('\n')) != std::string::npos) {
                     const std::string command = clients[index].input.substr(0, newline);
                     clients[index].input.erase(0, newline + 1);
-                    handle_command(clients[index], command, current_event);
+                    handle_command(clients[index], command, current_event,
+                                   current_io_events);
                 }
             }
             clients.erase(std::remove_if(clients.begin(), clients.end(),
@@ -314,15 +345,19 @@ int main(int argc, char** argv) {
 
             const auto sample_time = std::chrono::steady_clock::now();
             if (sample_time >= next_sample) {
-                const auto current = graywatch::read_system_psi();
+                const auto current = read_available_psi();
                 const auto current_tasks = graywatch::read_system_tasks();
+                const auto current_block = graywatch::read_block_devices();
                 const double elapsed = std::chrono::duration<double>(
                                            sample_time - previous_time)
                                            .count();
+                const auto pressure = graywatch::calculate_psi_intervals(
+                    previous, current, elapsed);
                 const auto event = make_event(
-                    graywatch::calculate_psi_intervals(previous, current, elapsed),
+                    pressure,
                     graywatch::calculate_task_intervals(previous_tasks, current_tasks),
-                    current_tasks.size(), options.top_threads, elapsed);
+                    current_tasks.size(), options.top_threads, elapsed,
+                    psi_available);
                 current_event = graywatch::to_json(event);
                 if (log) {
                     log << *current_event << '\n' << std::flush;
@@ -334,6 +369,36 @@ int main(int argc, char** argv) {
                         client.fd = -1;
                     }
                 }
+                const auto [io_some, io_full] = io_psi(pressure);
+                current_io_events.clear();
+                for (const auto& device : graywatch::calculate_block_intervals(
+                         previous_block, current_block, elapsed)) {
+                    const graywatch::IoDeviceEvent io_event{
+                        .timestamp = graywatch::current_timestamp_utc(),
+                        .interval_seconds = elapsed,
+                        .device = device,
+                        .psi_available = psi_available,
+                        .psi_some_stall_percent = io_some,
+                        .psi_full_stall_percent = io_full,
+                    };
+                    auto json = graywatch::to_json(io_event);
+                    current_io_events.push_back(json);
+                    if (log) log << json << '\n' << std::flush;
+                    const double severity = std::clamp(
+                        device.busy_percent / 100.0, 0.0, 1.0);
+                    for (auto& client : clients) {
+                        if (client.subscribed && severity >= client.minimum_severity &&
+                            !send_line(client.fd, json)) {
+                            close(client.fd);
+                            client.fd = -1;
+                        }
+                    }
+                }
+                clients.erase(std::remove_if(clients.begin(), clients.end(),
+                                             [](const Client& client) {
+                                                 return client.fd < 0;
+                                             }),
+                              clients.end());
                 clients.erase(std::remove_if(clients.begin(), clients.end(),
                                              [](const Client& client) {
                                                  return client.fd < 0;
@@ -341,6 +406,7 @@ int main(int argc, char** argv) {
                               clients.end());
                 previous = current;
                 previous_tasks = current_tasks;
+                previous_block = current_block;
                 previous_time = sample_time;
                 next_sample = sample_time +
                               std::chrono::duration_cast<

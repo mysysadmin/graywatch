@@ -39,7 +39,7 @@ void usage() {
                  "  graywatchctl tasks (-p PID | -u USER) "
                  "[--interval SECONDS] [--count SAMPLES] [--top THREADS] "
                  "[--json] [--log PATH]\n"
-                 "  graywatchctl status [--socket PATH]\n"
+                 "  graywatchctl status [--socket PATH] [--resource cpu|io]\n"
                  "  graywatchctl subscribe [--socket PATH] "
                  "[--min-severity 0..1] [--count EVENTS]\n";
 }
@@ -142,6 +142,7 @@ struct DaemonOptions {
     std::filesystem::path socket_path{"/run/graywatch/graywatchd.sock"};
     double minimum_severity{};
     unsigned int count{};
+    std::string resource{"cpu"};
 };
 
 DaemonOptions parse_daemon_options(int argc, char** argv, bool subscribe) {
@@ -150,6 +151,11 @@ DaemonOptions parse_daemon_options(int argc, char** argv, bool subscribe) {
         const std::string_view argument(argv[index]);
         if (argument == "--socket" && index + 1 < argc) {
             options.socket_path = argv[++index];
+        } else if (!subscribe && argument == "--resource" && index + 1 < argc) {
+            options.resource = argv[++index];
+            if (options.resource != "cpu" && options.resource != "io") {
+                throw std::invalid_argument("--resource must be cpu or io");
+            }
         } else if (subscribe && argument == "--min-severity" &&
                    index + 1 < argc) {
             const std::string value(argv[++index]);
@@ -230,7 +236,7 @@ std::optional<std::string> receive_line(int fd, std::string& pending) {
 void daemon_status(const DaemonOptions& options) {
     const int fd = connect_daemon(options.socket_path);
     try {
-        send_command(fd, "GET");
+        send_command(fd, options.resource == "io" ? "GET io" : "GET");
         std::string pending;
         const auto line = receive_line(fd, pending);
         if (!line) {
@@ -422,6 +428,7 @@ void tasks(const TaskOptions& options) {
         const graywatch::CpuPressureEvent event{
             .timestamp = graywatch::current_timestamp_utc(),
             .interval_seconds = elapsed,
+            .psi_available = true,
             .severity = std::clamp(cpu_some_percent / 100.0, 0.0, 1.0),
             .some_stall_percent = cpu_some_percent,
             .full_stall_percent = cpu_full_percent,
