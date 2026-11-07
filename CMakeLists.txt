@@ -11,21 +11,31 @@ option(GRAYWATCH_STATIC "Link the core Graywatch executables statically" OFF)
 
 add_library(graywatch_core
     src/block_stats.cpp
+    src/cluster.cpp
     src/detector.cpp
     src/event.cpp
     src/io_health.cpp
+    src/json.cpp
     src/memory_stats.cpp
     src/network_stats.cpp
+    src/process.cpp
     src/psi.cpp
+    src/report.cpp
     src/task_stats.cpp
     src/user_lookup.cpp
 )
 target_include_directories(graywatch_core PUBLIC include)
+find_package(Threads REQUIRED)
+target_link_libraries(graywatch_core PUBLIC Threads::Threads)
 target_compile_options(graywatch_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 add_executable(graywatchctl src/main.cpp)
 target_link_libraries(graywatchctl PRIVATE graywatch_core)
 target_compile_options(graywatchctl PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+add_executable(graywatch-report src/report_main.cpp)
+target_link_libraries(graywatch-report PRIVATE graywatch_core)
+target_compile_options(graywatch-report PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 add_executable(graywatchd src/daemon.cpp)
 target_link_libraries(graywatchd PRIVATE graywatch_core)
@@ -37,9 +47,10 @@ if(GRAYWATCH_STATIC)
     endif()
     target_link_options(graywatchctl PRIVATE -static)
     target_link_options(graywatchd PRIVATE -static)
+    target_link_options(graywatch-report PRIVATE -static)
 endif()
 
-install(TARGETS graywatchctl
+install(TARGETS graywatchctl graywatch-report
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 install(TARGETS graywatchd
@@ -106,12 +117,10 @@ if(BUILD_TESTING)
     target_compile_options(memory_stats_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME memory_stats COMMAND memory_stats_test)
 
-    find_package(Python3 3.8 COMPONENTS Interpreter)
-    if(Python3_Interpreter_FOUND)
-        add_test(NAME support_report
-            COMMAND ${Python3_EXECUTABLE} -I
-                ${CMAKE_CURRENT_SOURCE_DIR}/tests/support_report_test.py)
-    endif()
+    add_executable(report_test tests/report_test.cpp)
+    target_link_libraries(report_test PRIVATE graywatch_core)
+    target_compile_options(report_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME support_report COMMAND report_test)
 
     add_executable(user_lookup_test tests/user_lookup_test.cpp)
     target_link_libraries(user_lookup_test PRIVATE graywatch_core)

@@ -12,14 +12,17 @@ The current implementation provides:
   without PSI;
 - per-thread scheduler delay and uninterruptible (`D`-state) attribution;
 - per-device block activity, queueing, saturation, and absolute-latency health;
-- optional eBPF block service-time histograms and completion errors;
+- an optional eBPF helper with FUSE request latency per opcode, block queue
+  versus device time, `D`-state durations with kernel stacks, per-cgroup
+  run-queue latency, per-connection TCP retransmits, and direct-reclaim
+  stalls per process;
 - system-wide TCP retransmission/error intervals;
 - InfiniBand link state, rate, congestion, and error-counter intervals;
 - current-state queries and resource-filtered subscriptions over a local Unix
   socket; and
 - a stateless multi-node support snapshot over SSH; and
-- a portable incident bundle plus a report tool that turns its archive into a
-  summary for support engineers.
+- a portable incident bundle plus a report tool (`graywatch-report`, C++, no
+  Python) that turns its archive into a summary for support engineers.
 
 PSI is optional. On a kernel where `/proc/pressure` is unavailable, CPU events
 explicitly report `condition: unavailable` while task, memory, block, TCP, and
@@ -109,7 +112,7 @@ through the site's normal package-management process. Graywatch's documented
 and supported CMake configuration uses `-G Ninja`; do not silently fall back to
 a different generator in deployment automation.
 
-The optional eBPF collector additionally requires Clang/LLVM, `bpftool`, ELF
+The optional eBPF helper additionally requires Clang/LLVM, `bpftool`, ELF
 development headers, and zlib development headers. For Ubuntu:
 
 ```sh
@@ -144,8 +147,9 @@ tools/build-portable.sh
 ```
 
 This uses the same Ninja build and test suite, enables `GRAYWATCH_STATIC`,
-verifies that both executables have no dynamic-library dependencies, and writes
-an archive plus relocatable checksum to `dist/`:
+verifies that `graywatchd`, `graywatchctl`, and `graywatch-report` have no
+dynamic-library dependencies, and writes an archive plus relocatable checksum
+to `dist/`:
 
 ```text
 dist/graywatch-portable-COMMIT-linux-x86_64.tar.gz
@@ -168,9 +172,17 @@ sudo ./collect-graywatch-support.sh --duration 60 \
   --output /tmp/graywatch-incident.tar.gz
 ```
 
+When Clang, `bpftool`, and the libbpf submodule are present, the bundle also
+contains `bin/graywatch-bpf` (force with `GRAYWATCH_PORTABLE_BPF=1`, skip with
+`GRAYWATCH_PORTABLE_BPF=0`). It links libbpf and the C++ runtime statically but
+needs the target's glibc 2.34 or later, `libelf.so.1`, `libz.so.1` and
+`libzstd.so.1` (present on Rocky/RHEL 9, Debian 12 and Ubuntu 22.04 or later),
+because Rocky 9 ships no static libelf. See
+[eBPF helper](#ebpf-helper-graywatch-bpf).
+
 Root is optional. It improves visibility into other users' processes and their
-wait channels, and lets the script read the kernel log where `dmesg_restrict`
-is set. A non-root collection still reports all readable CPU, memory, block,
+wait channels, lets the script read the kernel log where `dmesg_restrict` is
+set, and is required for the eBPF helper. A non-root collection still reports all readable CPU, memory, block,
 TCP, and InfiniBand evidence. The support archive contains:
 
 - `system.txt`: kernel/OS identity, CPU count, kernel command line, PSI status,
@@ -180,7 +192,10 @@ TCP, and InfiniBand evidence. The support archive contains:
   `/proc/meminfo` and `/proc/vmstat` snapshots;
 - `events.jsonl`: every one-second interval event;
 - `kernel.log`: the last 5,000 kernel log lines (omit with `--no-kernel-log`);
-  and
+- `bpf-events.jsonl` and `bpf.stderr`: eBPF helper output when running as root
+  on a kernel with BTF (skip with `--no-bpf`);
+- `report.txt`: the support summary, generated on the host at the end of the
+  collection; and
 - daemon stdout/stderr diagnostics and `collection-errors.txt`.
 
 A failed optional step, such as a missing `lsblk` or a status query that times
@@ -196,16 +211,18 @@ archive is the only retained result.
 
 ### Support report
 
-`graywatch-report.py` turns a support archive into a ranked summary for a
-support engineer. It needs only Python 3.8 or newer and reads the archive in
-memory without extracting it. It runs on any machine, so the affected host
-needs no Python:
+`graywatch-report` turns a support archive into a ranked summary for a support
+engineer. It is a static C++ binary in the bundle (and `build/graywatch-report`
+in a normal build), so no Python is needed anywhere. It accepts the archive
+or an extracted directory and reads archive members through `tar` without
+writing them to disk. The collector already stores its output as `report.txt`
+in the archive; rerun it for other formats:
 
 ```sh
-python3 tools/graywatch-report.py graywatch-incident.tar.gz
-python3 tools/graywatch-report.py graywatch-incident.tar.gz --format markdown \
+bin/graywatch-report graywatch-incident.tar.gz
+bin/graywatch-report graywatch-incident.tar.gz --format markdown \
   --output incident.md
-python3 tools/graywatch-report.py graywatch-incident.tar.gz --format json
+bin/graywatch-report graywatch-incident.tar.gz --format json
 ```
 
 The report contains:
@@ -225,6 +242,12 @@ The report contains:
 - kernel log matches (I/O errors, NVMe timeouts, hung tasks, OOM, lockups, link
   flaps, filesystem and hardware errors). Matches from more than 15 minutes
   before the window are reported as history rather than as findings; and
+- eBPF findings when `bpf-events.jsonl` is present: FUSE requests still
+  waiting for the daemon (critical at 5 s), slow FUSE opcodes, block devices
+  whose time is spent queued rather than in the device, tasks still in `D`
+  state with their kernel stack, cgroups with run-queue p99 of 10 ms or more,
+  the connections that retransmitted, and the processes and cgroups that
+  stalled in reclaim; Graywatch's own processes are filtered out; and
 - collection coverage: root or not, PSI status with how to enable it,
   `hidepid`, sampling gaps, and daemon errors.
 
@@ -233,8 +256,8 @@ The thresholds in the report are triage heuristics. The daemon's per-interval
 
 The x86-64 artifact was validated unchanged on Rocky Linux 9, Debian 13, and
 Pop!_OS with Linux 6.12, 6.18, and the playground's 5.14/7.1 kernels. Separate
-architecture builds are required for AArch64. The optional eBPF collector is
-not included because it has distinct BTF and privilege requirements.
+architecture builds are required for AArch64. The eBPF helper was validated on
+the playground's Rocky 9 5.14 and 7.1 kernels.
 
 ## Command-line inspection
 
@@ -305,8 +328,8 @@ queried, which keeps the portable client independent of glibc NSS modules.
 This is scheduler and blocked-state attribution, not complete per-process I/O
 or memory accounting. System and cgroup PSI cannot be filtered directly by PID
 or UID. Graywatch reports a thread currently blocked in uninterruptible state,
-but does not yet assign an exact duration or storage/network cause to every
-sleep. Those require additional accounting or eBPF collectors.
+but does not assign an exact duration or cause to every sleep. The optional
+eBPF helper measures each `D`-state sleep and records its kernel stack.
 
 Each `tasks` interval also includes system-wide CPU pressure from PSI:
 
@@ -383,8 +406,8 @@ These are baseline-independent guardrails. They prevent chronic poor service
 from becoming statistically normal, but do not replace the planned
 workload-aware baseline for smaller relative regressions. `assessment_reason`
 distinguishes capacity saturation from latency degradation. These kernel block
-averages include time spent queued; the optional eBPF collector adds
-per-operation tail service latency.
+averages include time spent queued; the optional eBPF helper splits queue
+and device time and adds per-operation tail latency.
 
 See [docs/io-detection.md](docs/io-detection.md) for the baseline model and
 evidence boundaries, and
@@ -432,34 +455,94 @@ stalls, file refaults, OOM kills, and the PSI values. PSI availability is
 evaluated every interval, so an interval with a failed PSI read reports
 `psi_available: false` instead of zero stall time.
 
-## eBPF block service latency prototype
+## eBPF helper (graywatch-bpf)
 
-Build the optional collector after initializing submodules:
+`graywatch-bpf` is an optional, root-only helper that adds kernel evidence
+`/proc` and `/sys` cannot provide. Build it after initializing submodules:
 
 ```sh
 git submodule update --init --recursive
-make -C bpf -j
-sudo ./bpf/.output/graywatch-biolatency --interval 1
+make -C bpf -j            # or: make -C bpf STATIC=1 (portable bundle)
+sudo ./bpf/.output/graywatch-bpf --interval 1 --duration 60
 ```
 
-The collector requires kernel BTF at `/sys/kernel/btf/vmlinux` and sufficient
-privilege to load and attach BPF programs (normally root in the prototype).
-The resulting binary uses CO-RE and was validated unchanged across the
-playground's Linux 5.14 and 7.1 kernels.
+```text
+graywatch-bpf [--interval SECONDS] [--duration SECONDS]
+              [--collectors fuse,block,offcpu,runqueue,tcp_retransmit,reclaim]
+              [--top N] [--blocked-report-ms MS]
+```
 
-It correlates `blk_mq_start_request` with the raw `block_rq_complete` tracepoint by request pointer
-and reports per-device, per-operation interval counts, bytes, average service
-latency, logarithmic p50/p95/p99 upper bounds, and errors. This is dispatch-to-
-completion service latency; it intentionally excludes scheduler queue time.
-The portable `/sys/block` metrics remain the queue-inclusive companion signal.
+It needs kernel BTF at `/sys/kernel/btf/vmlinux` and uses CO-RE, so one binary
+runs unchanged on the playground's 5.14 and 7.1 kernels. Each collector is
+enabled only if the kernel has its hook. If the verifier rejects a collector,
+the others still load. The first line is a `bpf_status` event listing each
+collector, the hook it attached to, and the reason any collector is disabled.
+Then one `bpf_interval` event per key and interval follows on stdout (JSON
+lines, schema version 1). Latencies are log2 histograms
+(`histogram_us`, keyed by bucket upper bound) with count, total, average, max
+and p50/p99 upper bounds. The collectors:
 
-The hook begins at `blk_mq_start_request`, so it describes physical-device
-service rather than every failure in the storage stack. An error completed by
-a device-mapper target before hardware dispatch, or a FUSE/client stall above
-the block layer, will not appear as an eBPF device error. That absence is useful
-correlation evidence: high application latency with healthy local block
-service points investigation above the physical device. Future collectors will
-cover those upper layers explicitly.
+| Collector | Hooks | Key | What it answers |
+| --- | --- | --- | --- |
+| `fuse` | fentry/fexit `fuse_simple_request` (5.14) or `__fuse_simple_request` (6.x+) | mount, opcode | How long the FUSE daemon took to answer each kind of request, which requests are still waiting and for how long, and error replies (ENOENT, ENODATA, ERANGE, ENOSYS and EOPNOTSUPP are not errors). |
+| `block` | `block_rq_insert`, `blk_mq_start_request`, `block_rq_complete` | device, operation | Queue time (insert to dispatch, i.e. scheduler and tag waits) versus device time (dispatch to completion), bytes, errors. |
+| `offcpu` | `sched_switch`, `sched_wakeup` | process, kernel stack | How long tasks slept in `D` state and in which kernel path, plus tasks still blocked longer than `--blocked-report-ms` (default 1000). |
+| `runqueue` | `sched_wakeup`, `sched_wakeup_new`, `sched_switch` | cgroup v2 path | Wakeup-to-run latency per cgroup, i.e. which service is starved for CPU. |
+| `tcp_retransmit` | `tcp_retransmit_skb` | connection | Which peers and ports retransmit, and the socket state. |
+| `reclaim` | `mm_vmscan_direct_reclaim_*`, `mm_vmscan_memcg_reclaim_*` | process, cgroup, kind | Who stalled in direct or memcg reclaim, for how long, and how many pages were reclaimed. |
+
+Example FUSE interval with a request still outstanding:
+
+```json
+{"event_type":"bpf_interval","collector":"fuse","mount":"/tmp/gw-fuse.Jbw0",
+ "opcode":"LOOKUP","count":2,"average_ms":300.124,"max_ms":300.126,
+ "p99_upper_us":524288,"errors":0,"outstanding":1,"oldest_outstanding_ms":158.949}
+```
+
+Boundaries:
+
+- FUSE latency covers synchronous requests (LOOKUP, GETATTR, OPEN, READDIR,
+  and direct or uncached reads and writes). Readahead and writeback are
+  background requests and are not timed. The latency includes the daemon's
+  backend round trips; it says *that* the daemon was slow, not why.
+- A thread waiting for FUSE sleeps interruptibly (`S`) unless it was
+  signalled or the request is non-interruptible. The `offcpu` collector
+  therefore misses most FUSE waits, which is why the `fuse` collector reports
+  outstanding requests itself.
+- Device-mapper targets are bio-based and never reach `blk_mq_start_request`.
+  Their time appears on the underlying devices. An error completed by a dm
+  target before hardware dispatch is not a block error here.
+- Stack ids and outstanding entries are checked against `/proc` every
+  interval. A map that fills up is cleared, and its dropped updates are
+  reported.
+- Measured overhead on a 72-CPU Rocky 9 node, with `kernel.bpf_stats_enabled`,
+  is about 1.5 µs of BPF time per context switch for all scheduler collectors
+  combined. That was 0.009% of CPU at 5,300 switches per second. The helper
+  process used about 0.05 CPU and 30 MB RSS.
+
+The collector script runs the helper automatically when it is root and BTF is
+present. The report tool reads `bpf-events.jsonl` from the archive.
+
+### Validating the FUSE collector
+
+`tests/fuse_delay_fixture.c` is a disposable FUSE filesystem that speaks the
+kernel protocol directly (no libfuse). It answers every LOOKUP with ENOENT
+after a fixed delay. Stopping it with `SIGSTOP` simulates a hung client:
+
+```sh
+cc -O2 -o /tmp/fuse-fixture tests/fuse_delay_fixture.c
+mnt=$(mktemp -d); sudo /tmp/fuse-fixture "$mnt" 300 &
+sudo ./bpf/.output/graywatch-bpf --collectors fuse --duration 15 > fuse.jsonl &
+helper=$!
+for i in $(seq 20); do stat "$mnt/missing-$i" 2>/dev/null; done
+sudo pkill -STOP -f fuse-fixture; (stat "$mnt/stuck" &); sleep 8
+sudo pkill -CONT -f fuse-fixture
+wait "$helper"   # not a bare wait: the fixture only exits on unmount
+sudo umount "$mnt"; rmdir "$mnt"
+```
+
+On Rocky 9 5.14 the support report for this run lists the LOOKUP as
+outstanding for 7.7 s (critical) and the slow LOOKUPs with an 8.3 s maximum.
 
 ## Reproducible degradation test
 
@@ -589,28 +672,38 @@ there was unsatisfied runnable CPU demand during 86% of that interval.
 
 ### Multi-node support snapshot
 
-The repository includes a stateless support helper that queries each node over
-SSH in parallel; it does not install a central service or retain metrics:
+`graywatchctl cluster` is a stateless support snapshot. It queries each node
+over SSH in parallel, with one connection per host, and does not install a
+central service or retain metrics:
 
 ```sh
-python3 tools/graywatch-cluster-status.py \
-  --user root nodea nodeb nodec noded
+graywatchctl cluster --user root nodea nodeb nodec noded
 ```
 
-It summarizes PSI availability, waiting-thread counts, the thread with the
-largest absolute scheduler wait, the busiest active block device, and current
-TCP/InfiniBand issues; never-used `inactive` ports are not listed as issues.
-Hosts are queried concurrently. Add `--json` when the
-snapshot should be attached to a support case or processed by another tool.
+```text
+graywatchctl cluster HOST... [--user USER] [--timeout SECONDS]
+                     [--remote-command PATH] [--socket PATH] [--json]
+```
+
+SSH runs with `BatchMode=yes`, so key-based access is required.
+`--remote-command` names the `graywatchctl` on the remote host (default
+`graywatchctl` on `PATH`). The snapshot summarizes PSI availability,
+waiting-thread counts, the thread with the largest absolute scheduler wait,
+memory condition, the busiest active block device, and current TCP/InfiniBand
+issues; never-used `inactive` ports are not listed as issues. Add `--json` when
+the snapshot should be attached to a support case or processed by another tool.
 
 Example output:
 
 ```text
-HOST                   CPU/PSI            WAIT TOP THREAD                   BUSIEST DEVICE                     NETWORK
-nodea                  unavailable/no-psi  1229 worker:6.3ms                 nvme2n1:100.0% r=1.13ms w=0.21ms  healthy
-nodeb                  unavailable/no-psi  1193 kworker:5.1ms                -                                  healthy
-noded                  unavailable/no-psi   918 worker:7.4ms                 -                                  healthy
+HOST                   CPU/PSI                WAIT TOP THREAD                 MEMORY                 BUSIEST DEVICE                     NETWORK
+nodea                  pressure/psi            819 M-Flease-8:6.3ms           -                      dm-0:0.0% r=0.00ms w=0.00ms        mlx4_0/2:link_down
+nodeb                  pressure/psi           1031 ZDirector:4.8ms            -                      -                                  mlx4_0/1:congested +1
+noded                  pressure/psi            405 D-mFlease:6.5ms            -                      -                                  healthy
 ```
+
+`-` in MEMORY means the remote daemon predates the memory resource (here, the
+playground's installed packages); `+1` counts further network issues.
 
 ## Current boundaries and next work
 
@@ -622,8 +715,10 @@ sizes, IOPS, and queue-depth ranges; it must not train only while idle or allow
 a chronic bad state to become healthy. The design is documented in
 [docs/io-detection.md](docs/io-detection.md).
 
-Cgroup-scoped memory and CPU attribution, TCP connection-level
-evidence, FUSE/RPC latency probes, persisted transition-only logs, and a
-privilege-separated production BPF helper remain future work. The standalone
-eBPF collector is deliberately optional and privileged; `graywatchd` and its
-application clients remain unprivileged.
+The eBPF helper provides cgroup run-queue and reclaim attribution, TCP
+connection evidence, and FUSE latency, but only as a standalone root process
+whose output goes to support archives. Feeding that evidence into `graywatchd`
+events through a privilege-separated helper, cgroup-scoped memory pressure,
+asynchronous (readahead/writeback) FUSE timing, and persisted transition-only
+logs remain future work. `graywatchd` and its application clients remain
+unprivileged.

@@ -29,19 +29,46 @@ install -m 0755 "$build_dir/graywatchd" "$stage/bin/graywatchd"
 install -m 0755 "$build_dir/graywatchctl" "$stage/bin/graywatchctl"
 install -m 0755 "$root/tools/collect-graywatch-support.sh" \
     "$stage/collect-graywatch-support.sh"
-install -m 0755 "$root/tools/graywatch-report.py" "$stage/graywatch-report.py"
+install -m 0755 "$build_dir/graywatch-report" "$stage/bin/graywatch-report"
+
+# The eBPF helper is included when its toolchain is present (or required with
+# GRAYWATCH_PORTABLE_BPF=1; skipped with GRAYWATCH_PORTABLE_BPF=0).
+bpf_mode=${GRAYWATCH_PORTABLE_BPF:-auto}
+if [ "$bpf_mode" != 0 ]; then
+    missing=""
+    for command in clang bpftool make; do
+        command -v "$command" >/dev/null 2>&1 || missing="$missing $command"
+    done
+    [ -f "$root/third_party/libbpf/src/Makefile" ] || missing="$missing libbpf-submodule"
+    if [ -z "$missing" ]; then
+        make -C "$root/bpf" clean >/dev/null
+        make -C "$root/bpf" STATIC=1
+        install -m 0755 "$root/bpf/.output/graywatch-bpf" "$stage/bin/graywatch-bpf"
+    elif [ "$bpf_mode" = 1 ]; then
+        echo "cannot build graywatch-bpf, missing:$missing" >&2
+        exit 1
+    else
+        echo "skipping graywatch-bpf, missing:$missing" >&2
+    fi
+fi
 install -m 0644 "$root/portable/README.txt" "$stage/README.txt"
 
-if ldd "$stage/bin/graywatchd" 2>&1 | grep -qv "not a dynamic executable"; then
-    echo "graywatchd is not fully static" >&2
-    exit 1
-fi
-if ldd "$stage/bin/graywatchctl" 2>&1 | grep -qv "not a dynamic executable"; then
-    echo "graywatchctl is not fully static" >&2
-    exit 1
+for binary in graywatchd graywatchctl graywatch-report; do
+    if ldd "$stage/bin/$binary" 2>&1 | grep -qv "not a dynamic executable"; then
+        echo "$binary is not fully static" >&2
+        exit 1
+    fi
+done
+if [ -x "$stage/bin/graywatch-bpf" ]; then
+    unexpected=$(ldd "$stage/bin/graywatch-bpf" | awk '{print $1}' |
+        grep -Ev '^(linux-vdso\.so|/lib64/ld-linux|libc\.so|libm\.so|libelf\.so|libz\.so|libzstd\.so)' || true)
+    if [ -n "$unexpected" ]; then
+        echo "graywatch-bpf has unexpected dynamic dependencies: $unexpected" >&2
+        exit 1
+    fi
 fi
 
-(cd "$stage" && sha256sum bin/graywatchd bin/graywatchctl > SHA256SUMS)
+(cd "$stage" && sha256sum bin/* > SHA256SUMS)
 tar -C "$build_dir/stage" -czf "$output_dir/$bundle.tar.gz" "$bundle"
 (cd "$output_dir" && sha256sum "$bundle.tar.gz" > "$bundle.tar.gz.sha256")
 echo "$output_dir/$bundle.tar.gz"

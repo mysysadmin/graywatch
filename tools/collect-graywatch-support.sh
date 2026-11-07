@@ -4,10 +4,11 @@ set -eu
 duration=60
 output=""
 kernel_log=1
+bpf=1
 ignored_ports=""
 usage() {
     echo "usage: $0 [--duration SECONDS] [--output ARCHIVE.tar.gz]" \
-         "[--ignore-ib-port DEVICE/PORT]... [--no-kernel-log]" >&2
+         "[--ignore-ib-port DEVICE/PORT]... [--no-kernel-log] [--no-bpf]" >&2
     exit 2
 }
 while [ "$#" -gt 0 ]; do
@@ -35,6 +36,10 @@ while [ "$#" -gt 0 ]; do
             kernel_log=0
             shift
             ;;
+        --no-bpf)
+            bpf=0
+            shift
+            ;;
         *)
             usage
             ;;
@@ -50,9 +55,13 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if [ -x "$script_dir/bin/graywatchd" ]; then
     daemon="$script_dir/bin/graywatchd"
     client="$script_dir/bin/graywatchctl"
+    reporter="$script_dir/bin/graywatch-report"
+    bpf_helper="$script_dir/bin/graywatch-bpf"
 else
     daemon=${GRAYWATCHD:-graywatchd}
     client=${GRAYWATCHCTL:-graywatchctl}
+    reporter=${GRAYWATCH_REPORT:-graywatch-report}
+    bpf_helper=${GRAYWATCH_BPF:-graywatch-bpf}
 fi
 
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -61,12 +70,13 @@ host=$(hostname 2>/dev/null || echo unknown)
 work=$(mktemp -d "${TMPDIR:-/tmp}/graywatch-support.XXXXXX")
 socket="$work/graywatch.sock"
 daemon_pid=""
+bpf_pid=""
 
 cleanup() {
-    if [ -n "$daemon_pid" ]; then
-        kill "$daemon_pid" >/dev/null 2>&1 || true
-        wait "$daemon_pid" 2>/dev/null || true
-    fi
+    for pid in $daemon_pid $bpf_pid; do
+        kill "$pid" >/dev/null 2>&1 || true
+        wait "$pid" 2>/dev/null || true
+    done
     rm -rf "$work"
 }
 trap cleanup EXIT INT TERM
@@ -161,6 +171,22 @@ snapshot() {
     cp /proc/vmstat "$work/vmstat-$1.txt" 2>/dev/null || true
 }
 
+# The eBPF helper needs root and kernel BTF. It stops by itself after the
+# window, and the collection continues without it if it cannot load.
+if [ "$bpf" -eq 1 ]; then
+    if [ "$(id -u)" -ne 0 ]; then
+        note_error "eBPF collectors skipped: not running as root"
+    elif [ ! -r /sys/kernel/btf/vmlinux ]; then
+        note_error "eBPF collectors skipped: /sys/kernel/btf/vmlinux missing"
+    elif ! command -v "$bpf_helper" >/dev/null 2>&1; then
+        note_error "eBPF collectors skipped: graywatch-bpf not in this bundle"
+    else
+        "$bpf_helper" --interval 1 --duration $((duration + 2)) \
+            > "$work/bpf-events.jsonl" 2> "$work/bpf.stderr" &
+        bpf_pid=$!
+    fi
+fi
+
 sleep 2
 snapshot initial
 echo "Collecting for ${duration}s; press Ctrl-C to abort." >&2
@@ -170,9 +196,15 @@ if ! kill -0 "$daemon_pid" 2>/dev/null; then
 fi
 snapshot final
 
-kill "$daemon_pid" >/dev/null 2>&1 || true
-wait "$daemon_pid" 2>/dev/null || true
+for pid in $daemon_pid $bpf_pid; do
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" 2>/dev/null || true
+done
 daemon_pid=""
+bpf_pid=""
+if [ -f "$work/bpf-events.jsonl" ] && [ ! -s "$work/bpf-events.jsonl" ]; then
+    note_error "eBPF helper produced no events: $(head -n 1 "$work/bpf.stderr" 2>/dev/null)"
+fi
 
 if [ "$kernel_log" -eq 1 ]; then
     # Kernel messages carry I/O errors, hung-task reports, OOM kills and link
@@ -184,5 +216,9 @@ if [ "$kernel_log" -eq 1 ]; then
 fi
 
 rm -f "$socket"
+if command -v "$reporter" >/dev/null 2>&1; then
+    "$reporter" "$work" > "$work/report.txt" 2>> "$work/collection-errors.txt" ||
+        note_error "graywatch-report failed"
+fi
 tar -C "$work" -czf "$output" .
 echo "$output"

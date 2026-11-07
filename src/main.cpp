@@ -1,3 +1,4 @@
+#include "graywatch/cluster.hpp"
 #include "graywatch/detector.hpp"
 #include "graywatch/event.hpp"
 #include "graywatch/psi.hpp"
@@ -42,7 +43,9 @@ void usage() {
                  "  graywatchctl status [--socket PATH] [--resource cpu|io|memory|network]\n"
                  "  graywatchctl subscribe [--socket PATH] "
                  "[--resource cpu|io|memory|network|all] "
-                 "[--min-severity 0..1] [--count EVENTS]\n";
+                 "[--min-severity 0..1] [--count EVENTS]\n"
+                 "  graywatchctl cluster HOST... [--user USER] [--timeout SECONDS] "
+                 "[--remote-command PATH] [--socket PATH] [--json]\n";
 }
 
 double parse_positive_double(const char* text, std::string_view option) {
@@ -539,6 +542,9 @@ int main(int argc, char** argv) {
         if (command == "subscribe") {
             daemon_subscribe(parse_daemon_options(argc, argv, true));
             return 0;
+        }
+        if (command == "cluster") {
+            return graywatch::run_cluster(argc, argv, 2);
         }
         if (command != "psi" && command != "health" && command != "tasks") {
             throw std::invalid_argument("unknown command: " + std::string(command));

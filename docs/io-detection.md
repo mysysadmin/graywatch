@@ -37,8 +37,11 @@ on the semantic condition without knowing the statistical implementation.
 
 Portable `/sys/block/*/stat` intervals include block-layer queueing and provide
 average completion latency, utilization and average queue depth. The eBPF
-collector measures `blk_mq_start_request` through completion, giving physical
-device service distributions and errors that reach hardware dispatch.
+helper (`graywatch-bpf`) splits each request into queue time
+(`block_rq_insert` to `blk_mq_start_request`) and device time
+(`blk_mq_start_request` to completion), giving per-operation distributions
+and errors that reach hardware dispatch. Its FUSE collector times requests
+above the block layer, from the kernel sending them to the daemon answering.
 
 These signals deliberately overlap but are not interchangeable:
 
@@ -46,12 +49,16 @@ These signals deliberately overlap but are not interchangeable:
   before the physical device;
 - high service tail latency on several unrelated processes supports a shared
   device/system diagnosis;
-- a FUSE wait, RPC timeout or device-mapper error completed above
-  `blk_mq_start_request` is invisible to the physical-device probe;
+- high queue time with low device time means the delay is in the I/O
+  scheduler or tag allocation rather than in the device;
+- an RPC timeout or a device-mapper error completed above
+  `blk_mq_start_request` is invisible to the physical-device probe. FUSE
+  waits are visible only through the FUSE collector;
 - absence of block degradation is evidence, not proof, that the problem is in
   the application, filesystem client or network path.
 
-The BPF collector currently runs separately as root. The intended production
+The eBPF helper currently runs separately as root and writes JSON lines into
+support archives. The intended production
 boundary is a minimal privileged collector that publishes bounded aggregates
 to an unprivileged `graywatchd`; applications never receive BPF privileges.
 
