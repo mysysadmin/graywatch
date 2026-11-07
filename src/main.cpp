@@ -39,7 +39,7 @@ void usage() {
                  "  graywatchctl tasks (-p PID | -u USER) "
                  "[--interval SECONDS] [--count SAMPLES] [--top THREADS] "
                  "[--json] [--log PATH]\n"
-                 "  graywatchctl status [--socket PATH] [--resource cpu|io]\n"
+                 "  graywatchctl status [--socket PATH] [--resource cpu|io|network]\n"
                  "  graywatchctl subscribe [--socket PATH] "
                  "[--min-severity 0..1] [--count EVENTS]\n";
 }
@@ -153,8 +153,9 @@ DaemonOptions parse_daemon_options(int argc, char** argv, bool subscribe) {
             options.socket_path = argv[++index];
         } else if (!subscribe && argument == "--resource" && index + 1 < argc) {
             options.resource = argv[++index];
-            if (options.resource != "cpu" && options.resource != "io") {
-                throw std::invalid_argument("--resource must be cpu or io");
+            if (options.resource != "cpu" && options.resource != "io" &&
+                options.resource != "network") {
+                throw std::invalid_argument("--resource must be cpu, io, or network");
             }
         } else if (subscribe && argument == "--min-severity" &&
                    index + 1 < argc) {
@@ -236,7 +237,8 @@ std::optional<std::string> receive_line(int fd, std::string& pending) {
 void daemon_status(const DaemonOptions& options) {
     const int fd = connect_daemon(options.socket_path);
     try {
-        send_command(fd, options.resource == "io" ? "GET io" : "GET");
+        send_command(fd, options.resource == "io" ? "GET io" :
+                         (options.resource == "network" ? "GET network" : "GET"));
         std::string pending;
         const auto line = receive_line(fd, pending);
         if (!line) {

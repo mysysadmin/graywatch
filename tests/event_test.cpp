@@ -92,6 +92,17 @@ int main() {
                 "I/O assessment absent");
         require(graywatch::json_array({json, io_json}).front() == '[',
                 "JSON array not produced");
+
+        const graywatch::IbPortEvent ib_event{
+            .timestamp = "2026-11-06T12:34:56.789Z", .interval_seconds = 1.0,
+            .port = {.device = "mlx5_0", .port = 2, .state = "DOWN",
+                     .physical_state = "Polling", .rate = "100 Gb/sec"},
+        };
+        const auto ib_json = graywatch::to_json(ib_event);
+        require(ib_json.find("\"resource\":\"network\"") != std::string::npos,
+                "network resource absent");
+        require(ib_json.find("\"condition\":\"link_down\"") != std::string::npos,
+                "down link not classified");
     } catch (const std::exception& error) {
         std::cerr << "event_test: " << error.what() << '\n';
         return 1;

@@ -171,6 +171,43 @@ std::string to_json(const IoDeviceEvent& event) {
     return output.str();
 }
 
+std::string to_json(const IbPortEvent& event) {
+    const auto& port = event.port;
+    const bool active = port.state == "ACTIVE";
+    const std::uint64_t errors = port.receive_errors + port.transmit_discards +
+                                 port.symbol_errors + port.link_downed;
+    const std::string_view condition = !active ? "link_down" :
+        (errors != 0 ? "degraded" :
+         (port.transmit_wait != 0 ? "congested" : "healthy"));
+    const double severity = !active ? 0.8 :
+        (errors != 0 ? std::clamp(0.8 + static_cast<double>(errors) / 100.0,
+                                  0.8, 1.0) :
+         (port.transmit_wait != 0 ? 0.5 : 0.01));
+    std::ostringstream output;
+    output << std::fixed << std::setprecision(6)
+           << "{\"schema_version\":" << IbPortEvent::schema_version
+           << ",\"event_type\":\"resource_health\",\"timestamp\":";
+    json_string(output, event.timestamp);
+    output << ",\"resource\":\"network\",\"condition\":\"" << condition
+           << "\",\"severity\":" << severity
+           << ",\"interval_seconds\":" << event.interval_seconds
+           << ",\"interface\":{";
+    output << "\"kind\":\"infiniband\",\"device\":";
+    json_string(output, port.device);
+    output << ",\"port\":" << port.port << "},\"evidence\":{\"state\":";
+    json_string(output, port.state);
+    output << ",\"physical_state\":";
+    json_string(output, port.physical_state);
+    output << ",\"rate\":";
+    json_string(output, port.rate);
+    output << ",\"receive_errors\":" << port.receive_errors
+           << ",\"transmit_discards\":" << port.transmit_discards
+           << ",\"symbol_errors\":" << port.symbol_errors
+           << ",\"link_downed\":" << port.link_downed
+           << ",\"transmit_wait\":" << port.transmit_wait << "}}";
+    return output.str();
+}
+
 std::string json_array(const std::vector<std::string>& values) {
     std::ostringstream output;
     output << '[';

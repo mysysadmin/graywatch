@@ -1,6 +1,7 @@
 #include "graywatch/block_stats.hpp"
 #include "graywatch/event.hpp"
 #include "graywatch/io_health.hpp"
+#include "graywatch/network_stats.hpp"
 #include "graywatch/psi.hpp"
 #include "graywatch/task_stats.hpp"
 
@@ -137,7 +138,8 @@ bool send_line(int fd, std::string_view line) {
 
 void handle_command(Client& client, std::string_view command,
                     const std::optional<std::string>& current_event,
-                    const std::vector<std::string>& current_io_events) {
+                    const std::vector<std::string>& current_io_events,
+                    const std::vector<std::string>& current_network_events) {
     if (command == "GET") {
         if (current_event) {
             (void)send_line(client.fd, *current_event);
@@ -149,6 +151,10 @@ void handle_command(Client& client, std::string_view command,
     }
     if (command == "GET io") {
         (void)send_line(client.fd, graywatch::json_array(current_io_events));
+        return;
+    }
+    if (command == "GET network") {
+        (void)send_line(client.fd, graywatch::json_array(current_network_events));
         return;
     }
     constexpr std::string_view prefix = "SUBSCRIBE ";
@@ -275,6 +281,7 @@ int main(int argc, char** argv) {
         std::vector<Client> clients;
         std::optional<std::string> current_event;
         std::vector<std::string> current_io_events;
+        std::vector<std::string> current_network_events;
         auto previous = read_available_psi();
         const bool psi_available = !previous.empty();
         auto previous_tasks = graywatch::read_system_tasks();
@@ -283,6 +290,7 @@ int main(int argc, char** argv) {
         bool attribution_available = false;
         double attribution_elapsed{};
         auto previous_block = graywatch::read_block_devices();
+        auto previous_ib = graywatch::read_ib_ports();
         auto previous_time = std::chrono::steady_clock::now();
         auto previous_task_time = previous_time;
         auto latest_task_time = previous_time;
@@ -357,7 +365,7 @@ int main(int argc, char** argv) {
                     const std::string command = clients[index].input.substr(0, newline);
                     clients[index].input.erase(0, newline + 1);
                     handle_command(clients[index], command, current_event,
-                                   current_io_events);
+                                   current_io_events, current_network_events);
                 }
             }
             clients.erase(std::remove_if(clients.begin(), clients.end(),
@@ -370,6 +378,7 @@ int main(int argc, char** argv) {
             if (sample_time >= next_sample) {
                 const auto current = read_available_psi();
                 const auto current_block = graywatch::read_block_devices();
+                const auto current_ib = graywatch::read_ib_ports();
                 const double elapsed = std::chrono::duration<double>(
                                            sample_time - previous_time)
                                            .count();
@@ -437,6 +446,30 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
+                current_network_events.clear();
+                for (const auto& port : graywatch::calculate_ib_intervals(
+                         previous_ib, current_ib)) {
+                    const graywatch::IbPortEvent network_event{
+                        .timestamp = graywatch::current_timestamp_utc(),
+                        .interval_seconds = elapsed,
+                        .port = port,
+                    };
+                    auto json = graywatch::to_json(network_event);
+                    current_network_events.push_back(json);
+                    if (log) log << json << '\n' << std::flush;
+                    const bool active = port.state == "ACTIVE";
+                    const auto errors = port.receive_errors + port.transmit_discards +
+                                        port.symbol_errors + port.link_downed;
+                    const double severity = !active ? 0.8 :
+                        (errors != 0 ? 0.8 : (port.transmit_wait != 0 ? 0.5 : 0.01));
+                    for (auto& client : clients) {
+                        if (client.subscribed && severity >= client.minimum_severity &&
+                            !send_line(client.fd, json)) {
+                            close(client.fd);
+                            client.fd = -1;
+                        }
+                    }
+                }
                 clients.erase(std::remove_if(clients.begin(), clients.end(),
                                              [](const Client& client) {
                                                  return client.fd < 0;
@@ -449,6 +482,7 @@ int main(int argc, char** argv) {
                               clients.end());
                 previous = current;
                 previous_block = current_block;
+                previous_ib = current_ib;
                 previous_time = sample_time;
                 next_sample = sample_time +
                               std::chrono::duration_cast<

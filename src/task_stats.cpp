@@ -63,6 +63,7 @@ std::optional<TaskSample> read_task(int pid, int tid, unsigned int uid,
         }
         std::ifstream wchan(task_directory / "wchan");
         std::getline(wchan, sample.wait_channel);
+        if (sample.wait_channel == "0") sample.wait_channel.clear();
         return sample;
     } catch (const std::exception&) {
         return std::nullopt;

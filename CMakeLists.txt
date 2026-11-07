@@ -12,6 +12,7 @@ add_library(graywatch_core
     src/detector.cpp
     src/event.cpp
     src/io_health.cpp
+    src/network_stats.cpp
     src/psi.cpp
     src/task_stats.cpp
 )
@@ -82,4 +83,9 @@ if(BUILD_TESTING)
     target_link_libraries(io_health_test PRIVATE graywatch_core)
     target_compile_options(io_health_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME io_health COMMAND io_health_test)
+
+    add_executable(network_stats_test tests/network_stats_test.cpp)
+    target_link_libraries(network_stats_test PRIVATE graywatch_core)
+    target_compile_options(network_stats_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME network_stats COMMAND network_stats_test)
 endif()

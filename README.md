@@ -110,6 +110,7 @@ events through a Unix-domain socket:
 
 ./build/graywatchctl status --socket /tmp/graywatchd.sock
 ./build/graywatchctl status --socket /tmp/graywatchd.sock --resource io
+./build/graywatchctl status --socket /tmp/graywatchd.sock --resource network
 ./build/graywatchctl subscribe --socket /tmp/graywatchd.sock \
   --min-severity 0.10
 ```
@@ -143,6 +144,15 @@ See [docs/io-detection.md](docs/io-detection.md) for the baseline model and
 evidence boundaries, and
 [docs/playground-findings.md](docs/playground-findings.md) for validated
 cross-kernel, latency-injection and Quobyte correlation results.
+
+`status --resource network` currently returns one event per InfiniBand port.
+It reports logical and physical link state, configured rate, and interval
+deltas for receive errors, transmit discards, symbol errors, link-down events
+and transmit-wait ticks. Conditions are `healthy`, `congested`, `degraded`, or
+`link_down`. A down unused port is still reported as evidence; Graywatch does
+not yet know whether an application intended to use that port. Consumers
+should correlate the device/port or GID they selected rather than interpreting
+any down port as whole-machine failure.
 
 ## eBPF block service latency prototype
 
@@ -271,7 +281,10 @@ uses `/run`, not `/tmp`.
   the interval; `waiting_threads` counts those with run-queue delay.
 - `selection.blocked_threads` counts threads currently in uninterruptible
   `D` state. Each affected thread includes `state` and the kernel
-  `wait_channel` (for example, `request_wait_answer` for a FUSE request).
+  `wait_channel` when `/proc` permissions allow it (for example,
+  `request_wait_answer` for a FUSE request). The system daemon remains
+  unprivileged and reports an empty channel when the kernel's ptrace access
+  check hides another user's wait channel; it does not receive `CAP_SYS_PTRACE`.
 - `affected_threads` contains the highest absolute run-queue waits first. The
   daemon prioritizes blocked threads, then highest absolute run-queue waits,
   and includes at most `--top N` entries (default 20), while the counts still

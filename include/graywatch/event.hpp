@@ -3,6 +3,7 @@
 #include "graywatch/task_stats.hpp"
 #include "graywatch/block_stats.hpp"
 #include "graywatch/io_health.hpp"
+#include "graywatch/network_stats.hpp"
 
 #include <string>
 #include <string_view>
@@ -43,9 +44,18 @@ struct IoDeviceEvent {
     double psi_full_stall_percent{};
 };
 
+struct IbPortEvent {
+    static constexpr unsigned int schema_version = 1;
+
+    std::string timestamp;
+    double interval_seconds{};
+    IbPortInterval port;
+};
+
 std::string current_timestamp_utc();
 std::string to_json(const CpuPressureEvent& event);
 std::string to_json(const IoDeviceEvent& event);
+std::string to_json(const IbPortEvent& event);
 std::string json_array(const std::vector<std::string>& values);
 
 }  // namespace graywatch
