@@ -190,6 +190,12 @@ uses `/run`, not `/tmp`.
   daemon includes at most `--top N` entries (default 20), while the counts still
   describe all observed threads.
 
+A newly created thread needs two daemon snapshots before Graywatch can compute
+a counter delta, so it first becomes attributable in the interval after its
+initial observation. Threads that exit before a second snapshot cannot be
+attributed by this `/proc` collector; eBPF lifecycle events can close that gap
+later.
+
 System attribution depends on `/proc` visibility. With `hidepid` or an LSM
 policy, the unprivileged service may observe only a subset of tasks. The
 `observed_threads` value makes coverage visible but cannot count processes that
