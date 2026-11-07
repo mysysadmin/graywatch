@@ -1,6 +1,10 @@
 #ifndef GRAYWATCH_BIOLATENCY_H
 #define GRAYWATCH_BIOLATENCY_H
 
+#ifndef GRAYWATCH_BPF
+#include <linux/types.h>
+#endif
+
 #define GRAYWATCH_LATENCY_BUCKETS 32
 
 struct io_key {
