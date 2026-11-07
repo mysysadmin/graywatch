@@ -79,6 +79,8 @@ TaskSample parse_task_schedstat(int pid, int tid, unsigned int uid,
         .tid = tid,
         .uid = uid,
         .command = std::move(command),
+        .state = '?',
+        .wait_channel = {},
     };
     if (!(input >> sample.runtime_ns >> sample.runqueue_wait_ns >>
           sample.timeslices)) {
