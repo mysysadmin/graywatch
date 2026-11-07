@@ -42,5 +42,5 @@ fi
 
 (cd "$stage" && sha256sum bin/graywatchd bin/graywatchctl > SHA256SUMS)
 tar -C "$build_dir/stage" -czf "$output_dir/$bundle.tar.gz" "$bundle"
-sha256sum "$output_dir/$bundle.tar.gz" > "$output_dir/$bundle.tar.gz.sha256"
+(cd "$output_dir" && sha256sum "$bundle.tar.gz" > "$bundle.tar.gz.sha256")
 echo "$output_dir/$bundle.tar.gz"
