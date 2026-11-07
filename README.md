@@ -155,6 +155,40 @@ latency, logarithmic p50/p95/p99 upper bounds, and errors. This is dispatch-to-
 completion service latency; it intentionally excludes scheduler queue time.
 The portable `/sys/block` metrics remain the queue-inclusive companion signal.
 
+The hook begins at `blk_mq_start_request`, so it describes physical-device
+service rather than every failure in the storage stack. An error completed by
+a device-mapper target before hardware dispatch, or a FUSE/client stall above
+the block layer, will not appear as an eBPF device error. That absence is useful
+correlation evidence: high application latency with healthy local block
+service points investigation above the physical device. Future collectors will
+cover those upper layers explicitly.
+
+## Reproducible degradation test
+
+Use a disposable loop device and device-mapper delay target; never attach this
+test mapping to a production filesystem. A 250 ms delayed direct read was
+validated on the playground as follows:
+
+```sh
+truncate -s 16M /tmp/graywatch-delay.img
+loop=$(losetup --find --show /tmp/graywatch-delay.img)
+sectors=$(blockdev --getsz "$loop")
+echo "0 $sectors delay $loop 0 250" | dmsetup create graywatch-delay
+
+graywatchctl subscribe --min-severity 0.75 --count 1 &
+dd if=/dev/mapper/graywatch-delay of=/dev/null \
+  bs=4096 count=1 iflag=direct status=none
+
+dmsetup remove graywatch-delay
+losetup -d "$loop"
+rm -f /tmp/graywatch-delay.img
+```
+
+The expected event is `resource_health`, `condition: degraded`, with
+`assessment_reason: absolute_latency`. In the validated run, the measured
+average was 252 ms and severity was 0.845. Removal was followed by an `idle`
+state, demonstrating recovery without training a baseline.
+
 ### Install with systemd
 
 ```sh

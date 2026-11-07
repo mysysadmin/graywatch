@@ -8,6 +8,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <string>
@@ -25,6 +26,14 @@ std::string operation_name(std::uint32_t operation) {
         case 3: return "discard";
         default: return operation == 0xffffffff ? "error" : "other";
     }
+}
+
+std::string device_name(std::uint32_t major, std::uint32_t minor) {
+    std::error_code error;
+    const auto path = std::filesystem::canonical(
+        "/sys/dev/block/" + std::to_string(major) + ":" + std::to_string(minor),
+        error);
+    return error ? "" : path.filename().string();
 }
 
 __u64 percentile_us(const __u64 *buckets, __u64 count, double fraction) {
@@ -97,6 +106,7 @@ int main(int argc, char **argv) {
                     const double average_ms = delta.count == 0 ? 0.0 :
                         static_cast<double>(delta.total_latency_ns) / delta.count / 1e6;
                     std::cout << "{\"major\":" << major << ",\"minor\":" << minor
+                              << ",\"device\":\"" << device_name(major, minor) << "\""
                               << ",\"operation\":\"" << operation_name(next.operation)
                               << "\",\"count\":" << delta.count
                               << ",\"bytes\":" << delta.bytes
