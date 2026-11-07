@@ -140,7 +140,17 @@ submodules in the standard setup keeps the optional collector ready to build.
 
 ## Portable incident bundle
 
-Build a fully static, installation-free bundle on Linux:
+Build an installation-free bundle on any Linux host with Docker. The build
+runs in a Rocky 9 container, so the eBPF helper works on glibc 2.34 or later
+whatever the host's glibc is, and no toolchain is needed on the host:
+
+```sh
+tools/build-in-docker.sh            # writes dist/rocky9/
+GRAYWATCH_JOBS=16 tools/build-in-docker.sh rocky9
+```
+
+Each target is a `tools/docker/TARGET.Dockerfile`. To build directly on a host
+that already has the toolchain:
 
 ```sh
 tools/build-portable.sh
