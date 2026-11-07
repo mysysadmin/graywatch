@@ -1,10 +1,12 @@
 #include "graywatch/detector.hpp"
+#include "graywatch/event.hpp"
 #include "graywatch/psi.hpp"
 #include "graywatch/task_stats.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -29,7 +31,8 @@ void usage() {
                  "  graywatchctl health [--interval SECONDS] "
                  "[--count SAMPLES]\n"
                  "  graywatchctl tasks (-p PID | -u USER) "
-                 "[--interval SECONDS] [--count SAMPLES] [--top THREADS]\n";
+                 "[--interval SECONDS] [--count SAMPLES] [--top THREADS] "
+                 "[--json] [--log PATH]\n";
 }
 
 double parse_positive_double(const char* text, std::string_view option) {
@@ -79,6 +82,10 @@ struct TaskOptions {
     double interval_seconds{1.0};
     unsigned int count{};
     unsigned int top{20};
+    bool json{};
+    std::optional<std::string> log_path;
+    std::string selection_kind;
+    std::string selection_value;
 };
 
 TaskOptions parse_task_options(int argc, char** argv) {
@@ -86,8 +93,11 @@ TaskOptions parse_task_options(int argc, char** argv) {
     for (int index = 2; index < argc; ++index) {
         const std::string_view argument(argv[index]);
         if (argument == "-p" && index + 1 < argc) {
+            const std::string pid_text(argv[++index]);
             options.pid = static_cast<int>(
-                parse_positive_unsigned(argv[++index], "-p"));
+                parse_positive_unsigned(pid_text.c_str(), "-p"));
+            options.selection_kind = "pid";
+            options.selection_value = pid_text;
         } else if (argument == "-u" && index + 1 < argc) {
             const std::string user(argv[++index]);
             const passwd* entry = getpwnam(user.c_str());
@@ -95,6 +105,8 @@ TaskOptions parse_task_options(int argc, char** argv) {
                 throw std::invalid_argument("unknown user: " + user);
             }
             options.uid = entry->pw_uid;
+            options.selection_kind = "user";
+            options.selection_value = user;
         } else if (argument == "--interval" && index + 1 < argc) {
             options.interval_seconds =
                 parse_positive_double(argv[++index], "--interval");
@@ -102,6 +114,10 @@ TaskOptions parse_task_options(int argc, char** argv) {
             options.count = parse_positive_unsigned(argv[++index], "--count");
         } else if (argument == "--top" && index + 1 < argc) {
             options.top = parse_positive_unsigned(argv[++index], "--top");
+        } else if (argument == "--json") {
+            options.json = true;
+        } else if (argument == "--log" && index + 1 < argc) {
+            options.log_path = argv[++index];
         } else {
             throw std::invalid_argument("unknown or incomplete option: " +
                                         std::string(argument));
@@ -212,6 +228,13 @@ void tasks(const TaskOptions& options) {
         throw std::runtime_error("no readable tasks matched the selection");
     }
     unsigned int emitted{};
+    std::ofstream log;
+    if (options.log_path) {
+        log.open(*options.log_path, std::ios::app);
+        if (!log) {
+            throw std::runtime_error("cannot open event log: " + *options.log_path);
+        }
+    }
     const auto sleep_duration = std::chrono::duration<double>(options.interval_seconds);
     while (options.count == 0 || emitted < options.count) {
         std::this_thread::sleep_for(sleep_duration);
@@ -246,13 +269,48 @@ void tasks(const TaskOptions& options) {
                 return interval.runqueue_wait_ns != 0;
             });
 
+        std::vector<graywatch::TaskInterval> affected;
+        for (const auto& interval : intervals) {
+            if (affected.size() >= options.top) {
+                break;
+            }
+            if (interval.runqueue_wait_ns != 0) {
+                affected.push_back(interval);
+            }
+        }
+        const graywatch::CpuPressureEvent event{
+            .timestamp = graywatch::current_timestamp_utc(),
+            .interval_seconds = elapsed,
+            .severity = std::clamp(cpu_some_percent / 100.0, 0.0, 1.0),
+            .some_stall_percent = cpu_some_percent,
+            .full_stall_percent = cpu_full_percent,
+            .selection_kind = options.selection_kind,
+            .selection_value = options.selection_value,
+            .selected_active_threads = static_cast<std::size_t>(active_threads),
+            .selected_waiting_threads = static_cast<std::size_t>(waiting_threads),
+            .affected_threads = std::move(affected),
+        };
+        const std::string event_json = graywatch::to_json(event);
+        if (log) {
+            log << event_json << '\n' << std::flush;
+        }
+        if (options.json) {
+            std::cout << event_json << '\n' << std::flush;
+            previous = current;
+            previous_psi = current_psi;
+            previous_time = current_time;
+            ++emitted;
+            continue;
+        }
+
         std::cout << "SYSTEM_CPU condition="
                   << (cpu_some_us == 0 ? "NO_PRESSURE" : "PRESSURE")
-                  << " severity=" << std::clamp(cpu_some_percent / 100.0, 0.0, 1.0)
-                  << " some_stall_percent=" << cpu_some_percent
-                  << " full_stall_percent=" << cpu_full_percent
-                  << " selected_active_threads=" << active_threads
-                  << " selected_waiting_threads=" << waiting_threads << '\n';
+                  << " severity=" << event.severity
+                  << " some_stall_percent=" << event.some_stall_percent
+                  << " full_stall_percent=" << event.full_stall_percent
+                  << " selected_active_threads=" << event.selected_active_threads
+                  << " selected_waiting_threads=" << event.selected_waiting_threads
+                  << '\n';
 
         std::cout << "PID      TID      COMMAND                  CPU_MS    WAIT_MS  "
                      "RUNNABLE_WAIT%  SLICES\n";

@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(graywatch_core
     src/detector.cpp
+    src/event.cpp
     src/psi.cpp
     src/task_stats.cpp
 )
@@ -33,4 +34,9 @@ if(BUILD_TESTING)
     target_link_libraries(task_stats_test PRIVATE graywatch_core)
     target_compile_options(task_stats_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME task_stats COMMAND task_stats_test)
+
+    add_executable(event_test tests/event_test.cpp)
+    target_link_libraries(event_test PRIVATE graywatch_core)
+    target_compile_options(event_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME event_serialization COMMAND event_test)
 endif()

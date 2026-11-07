@@ -86,6 +86,19 @@ waiting for CPU; it is not based on a learned baseline. The selected thread
 counts answer whether the requested PID or user was affected. Per-thread wait
 times are not summed into PSI because several threads can wait simultaneously.
 
+Use JSON Lines for programmatic consumption or append the same versioned events
+to a log:
+
+```sh
+./build/graywatchctl tasks -p 1234 --json
+./build/graywatchctl tasks -u postgres --log /var/log/graywatch/events.jsonl
+```
+
+`--json` changes terminal output only. `--log` can be combined with human or
+JSON display and flushes each complete event immediately. The initial event
+schema is version 1 and includes the timestamp, interval, resource, condition,
+severity, raw PSI evidence, selection scope, and affected thread evidence.
+
 Example output:
 
 ```text
