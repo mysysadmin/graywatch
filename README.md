@@ -137,7 +137,7 @@ make -C bpf -j
 sudo ./bpf/.output/graywatch-biolatency --interval 1
 ```
 
-It correlates `blk_mq_start_request` with `blk_mq_end_request` by request pointer
+It correlates `blk_mq_start_request` with `blk_mq_complete_request` by request pointer
 and reports per-device, per-operation interval counts, bytes, average service
 latency, logarithmic p50/p95/p99 upper bounds, and errors. This is dispatch-to-
 completion service latency; it intentionally excludes scheduler queue time.
