@@ -86,3 +86,19 @@ capacity evidence applications may use for load placement; degradation needs
 separate latency/error or relative-regression evidence. The exact fio file was
 removed and verified absent on all four nodes.
 
+## Blocked task and network evidence
+
+A suspended disposable device-mapper target placed a direct-read `dd` process
+in uninterruptible `D` state. Graywatch reported `blocked_threads: 1` and the
+exact PID/TID even though it consumed no CPU and accumulated no run-queue wait.
+The service remains unprivileged, so the kernel hid the other user's wait
+channel; an empty `wait_channel` explicitly represents unavailable evidence.
+The mapper, loop and backing file were resumed and removed after the test.
+
+Live network events showed nodea, nodeb and nodec InfiniBand port 1 active at
+56 Gb/s and port 2 down/polling. Noded had both ports active at 56 Gb/s. All
+observed one-second InfiniBand error deltas were zero. TCP interval events on
+all four nodes showed active traffic with zero new retransmissions and input
+errors in the validation windows. This demonstrates why lifetime TCP counters
+must not be interpreted as current degradation.
+

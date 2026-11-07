@@ -23,6 +23,7 @@ def inspect(host: str, timeout: float, user):
     try:
         cpu = remote_json(host, "cpu", timeout, user)
         devices = remote_json(host, "io", timeout, user)
+        network = remote_json(host, "network", timeout, user)
         selection = cpu["selection"]
         affected = cpu.get("affected_threads", [])
         top_thread = max(affected, key=lambda item: item["runqueue_wait_ms"],
@@ -45,6 +46,9 @@ def inspect(host: str, timeout: float, user):
             "device_count": len(devices),
             "active_device_count": len(active_devices),
             "busiest_device": busiest,
+            "network_event_count": len(network),
+            "network_issues": [item for item in network
+                               if item["condition"] != "healthy"],
         }
     except Exception as error:  # support tool must report partial cluster state
         return {"host": host, "reachable": False, "error": str(error)}
@@ -63,6 +67,19 @@ def compact_device(value):
     return (f'{value["device"]["name"]}:{evidence["busy_percent"]:.1f}% '
             f'r={evidence["average_read_latency_ms"]:.2f}ms '
             f'w={evidence["average_write_latency_ms"]:.2f}ms')
+
+
+def compact_network(values):
+    if not values:
+        return "healthy"
+    value = values[0]
+    interface = value["interface"]
+    if interface["kind"] == "infiniband":
+        identity = f'{interface["device"]}/{interface["port"]}'
+    else:
+        identity = interface["kind"]
+    suffix = f' +{len(values) - 1}' if len(values) > 1 else ''
+    return f'{identity}:{value["condition"]}{suffix}'
 
 
 def main():
@@ -85,7 +102,7 @@ def main():
         return
 
     print(f'{"HOST":<22} {"CPU/PSI":<14} {"WAIT":>8} '
-          f'{"TOP THREAD":<28} {"BUSIEST DEVICE"}')
+          f'{"TOP THREAD":<28} {"BUSIEST DEVICE":<34} NETWORK')
     for row in rows:
         if not row["reachable"]:
             print(f'{row["host"]:<22} {"UNREACHABLE":<14} {"-":>8} '
@@ -96,7 +113,8 @@ def main():
         print(f'{row["host"]:<22} {cpu:<14} '
               f'{row["waiting_threads"]:>8} '
               f'{compact_thread(row["top_waiting_thread"]):<28} '
-              f'{compact_device(row["busiest_device"])}')
+              f'{compact_device(row["busiest_device"]):<34} '
+              f'{compact_network(row["network_issues"])}')
 
 
 if __name__ == "__main__":
