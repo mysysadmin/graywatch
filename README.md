@@ -89,6 +89,58 @@ ctest --test-dir build --output-on-failure
 The core daemon and client do not require eBPF or root to build. Initializing
 submodules in the standard setup keeps the optional collector ready to build.
 
+## Portable incident bundle
+
+Build a fully static, installation-free bundle on Linux:
+
+```sh
+tools/build-portable.sh
+```
+
+This uses the same Ninja build and test suite, enables `GRAYWATCH_STATIC`,
+verifies that both executables have no dynamic-library dependencies, and writes
+an archive plus relocatable checksum to `dist/`:
+
+```text
+dist/graywatch-portable-COMMIT-linux-x86_64.tar.gz
+dist/graywatch-portable-COMMIT-linux-x86_64.tar.gz.sha256
+```
+
+The static build additionally needs the static C and C++ runtimes. On Rocky 9
+these are the `glibc-static` and `libstdc++-static` packages from CRB, included
+in the installation command above. Override `GRAYWATCH_PORTABLE_BUILD_DIR` or
+`GRAYWATCH_PORTABLE_OUTPUT_DIR` when build and artifact directories must live
+elsewhere.
+
+Copy the archive to an affected machine, extract it in a temporary directory,
+and run a bounded collection without installing a package or service:
+
+```sh
+tar -xzf graywatch-portable-COMMIT-linux-x86_64.tar.gz
+cd graywatch-portable-COMMIT-linux-x86_64
+sudo ./collect-graywatch-support.sh --duration 60 \
+  --output /tmp/graywatch-incident.tar.gz
+```
+
+Root is optional. It improves visibility into other users' processes, while a
+non-root collection still reports all readable CPU, block, TCP, and InfiniBand
+evidence. The support archive contains:
+
+- system/kernel identity and procfs/sysfs mount options;
+- initial and final CPU, I/O, and network JSON state;
+- bounded interval JSON events; and
+- daemon stdout/stderr diagnostics.
+
+Process command names and thread identifiers can appear in events. Review an
+archive before sharing it outside the affected system. The script uses a
+private temporary directory, terminates its daemon, and removes working files
+on exit; the requested output archive is the only retained result.
+
+The x86-64 artifact was validated unchanged on Rocky Linux 9, Debian 13, and
+Pop!_OS with Linux 6.12, 6.18, and the playground's 5.14/7.1 kernels. Separate
+architecture builds are required for AArch64. The optional eBPF collector is
+not included because it has distinct BTF and privilege requirements.
+
 Read the current PSI snapshot:
 
 ```sh
