@@ -18,6 +18,20 @@ int main() {
         after.receive_errors = 1;
         if (graywatch::calculate_ib_interval(before, after))
             throw std::runtime_error("counter reset was accepted");
+
+        const auto tcp = graywatch::parse_tcp_snmp(
+            "Ip: Forwarding DefaultTTL\nIp: 2 64\n"
+            "Tcp: RtoAlgorithm OutSegs RetransSegs InErrs OutRsts\n"
+            "Tcp: 1 1000 20 3 4\n");
+        if (tcp.out_segments != 1000 || tcp.retransmitted_segments != 20 ||
+            tcp.input_errors != 3 || tcp.output_resets != 4)
+            throw std::runtime_error("TCP SNMP parse is wrong");
+        auto tcp_after = tcp;
+        tcp_after.out_segments += 200;
+        tcp_after.retransmitted_segments += 4;
+        const auto tcp_interval = graywatch::calculate_tcp_interval(tcp, tcp_after);
+        if (!tcp_interval || tcp_interval->retransmit_percent != 2.0)
+            throw std::runtime_error("TCP interval is wrong");
     } catch (const std::exception& error) {
         std::cerr << "network_stats_test: " << error.what() << '\n';
         return 1;

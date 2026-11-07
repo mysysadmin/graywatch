@@ -103,6 +103,15 @@ int main() {
                 "network resource absent");
         require(ib_json.find("\"condition\":\"link_down\"") != std::string::npos,
                 "down link not classified");
+
+        const graywatch::TcpEvent tcp_event{
+            .timestamp = "2026-11-06T12:34:56.789Z", .interval_seconds = 1.0,
+            .interval = {.out_segments = 1000, .retransmitted_segments = 20,
+                         .retransmit_percent = 2.0},
+        };
+        const auto tcp_json = graywatch::to_json(tcp_event);
+        require(tcp_json.find("\"condition\":\"unstable\"") != std::string::npos,
+                "TCP retransmission not classified");
     } catch (const std::exception& error) {
         std::cerr << "event_test: " << error.what() << '\n';
         return 1;

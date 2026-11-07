@@ -291,6 +291,7 @@ int main(int argc, char** argv) {
         double attribution_elapsed{};
         auto previous_block = graywatch::read_block_devices();
         auto previous_ib = graywatch::read_ib_ports();
+        auto previous_tcp = graywatch::read_tcp_sample();
         auto previous_time = std::chrono::steady_clock::now();
         auto previous_task_time = previous_time;
         auto latest_task_time = previous_time;
@@ -379,6 +380,7 @@ int main(int argc, char** argv) {
                 const auto current = read_available_psi();
                 const auto current_block = graywatch::read_block_devices();
                 const auto current_ib = graywatch::read_ib_ports();
+                const auto current_tcp = graywatch::read_tcp_sample();
                 const double elapsed = std::chrono::duration<double>(
                                            sample_time - previous_time)
                                            .count();
@@ -447,6 +449,30 @@ int main(int argc, char** argv) {
                     }
                 }
                 current_network_events.clear();
+                if (const auto tcp = graywatch::calculate_tcp_interval(
+                        previous_tcp, current_tcp)) {
+                    const graywatch::TcpEvent network_event{
+                        .timestamp = graywatch::current_timestamp_utc(),
+                        .interval_seconds = elapsed,
+                        .interval = *tcp,
+                    };
+                    auto json = graywatch::to_json(network_event);
+                    current_network_events.push_back(json);
+                    if (log) log << json << '\n' << std::flush;
+                    const bool error = tcp->input_errors != 0;
+                    const bool unstable = tcp->retransmitted_segments >= 10 &&
+                                          tcp->retransmit_percent >= 1.0;
+                    const double severity = error ? 0.8 :
+                        (unstable ? std::clamp(tcp->retransmit_percent / 10.0,
+                                               0.4, 1.0) : 0.01);
+                    for (auto& client : clients) {
+                        if (client.subscribed && severity >= client.minimum_severity &&
+                            !send_line(client.fd, json)) {
+                            close(client.fd);
+                            client.fd = -1;
+                        }
+                    }
+                }
                 for (const auto& port : graywatch::calculate_ib_intervals(
                          previous_ib, current_ib)) {
                     const graywatch::IbPortEvent network_event{
@@ -483,6 +509,7 @@ int main(int argc, char** argv) {
                 previous = current;
                 previous_block = current_block;
                 previous_ib = current_ib;
+                previous_tcp = current_tcp;
                 previous_time = sample_time;
                 next_sample = sample_time +
                               std::chrono::duration_cast<

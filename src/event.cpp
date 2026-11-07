@@ -208,6 +208,32 @@ std::string to_json(const IbPortEvent& event) {
     return output.str();
 }
 
+std::string to_json(const TcpEvent& event) {
+    const auto& tcp = event.interval;
+    const bool error = tcp.input_errors != 0;
+    const bool unstable = tcp.retransmitted_segments >= 10 &&
+                          tcp.retransmit_percent >= 1.0;
+    const std::string_view condition = error ? "degraded" :
+        (unstable ? "unstable" : "healthy");
+    const double severity = error ? 0.8 :
+        (unstable ? std::clamp(tcp.retransmit_percent / 10.0, 0.4, 1.0) : 0.01);
+    std::ostringstream output;
+    output << std::fixed << std::setprecision(6)
+           << "{\"schema_version\":" << TcpEvent::schema_version
+           << ",\"event_type\":\"resource_health\",\"timestamp\":";
+    json_string(output, event.timestamp);
+    output << ",\"resource\":\"network\",\"condition\":\"" << condition
+           << "\",\"severity\":" << severity
+           << ",\"interval_seconds\":" << event.interval_seconds
+           << ",\"interface\":{\"kind\":\"tcp\",\"device\":\"system\"}"
+           << ",\"evidence\":{\"out_segments\":" << tcp.out_segments
+           << ",\"retransmitted_segments\":" << tcp.retransmitted_segments
+           << ",\"retransmit_percent\":" << tcp.retransmit_percent
+           << ",\"input_errors\":" << tcp.input_errors
+           << ",\"output_resets\":" << tcp.output_resets << "}}";
+    return output.str();
+}
+
 std::string json_array(const std::vector<std::string>& values) {
     std::ostringstream output;
     output << '[';

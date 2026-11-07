@@ -4,6 +4,7 @@
 #include <charconv>
 #include <fstream>
 #include <map>
+#include <sstream>
 #include <system_error>
 #include <utility>
 
@@ -35,6 +36,58 @@ std::string state_name(std::string value) {
 }
 
 }  // namespace
+
+TcpSample parse_tcp_snmp(std::string_view text) {
+    std::istringstream input{std::string(text)};
+    std::string header_line;
+    while (std::getline(input, header_line)) {
+        if (!header_line.starts_with("Tcp:")) continue;
+        std::string value_line;
+        if (!std::getline(input, value_line) || !value_line.starts_with("Tcp:")) break;
+        std::istringstream headers(header_line);
+        std::istringstream values(value_line);
+        std::string prefix;
+        headers >> prefix;
+        values >> prefix;
+        std::map<std::string, std::uint64_t> fields;
+        std::string name;
+        std::uint64_t value{};
+        while (headers >> name && values >> value) fields[name] = value;
+        return {
+            .out_segments = fields["OutSegs"],
+            .retransmitted_segments = fields["RetransSegs"],
+            .input_errors = fields["InErrs"],
+            .output_resets = fields["OutRsts"],
+        };
+    }
+    return {};
+}
+
+TcpSample read_tcp_sample(const std::filesystem::path& path) {
+    std::ifstream input(path);
+    std::ostringstream text;
+    text << input.rdbuf();
+    return parse_tcp_snmp(text.str());
+}
+
+std::optional<TcpInterval> calculate_tcp_interval(const TcpSample& previous,
+                                                  const TcpSample& current) {
+    if (current.out_segments < previous.out_segments ||
+        current.retransmitted_segments < previous.retransmitted_segments ||
+        current.input_errors < previous.input_errors ||
+        current.output_resets < previous.output_resets) return std::nullopt;
+    const auto out = current.out_segments - previous.out_segments;
+    const auto retrans = current.retransmitted_segments -
+                         previous.retransmitted_segments;
+    return TcpInterval{
+        .out_segments = out,
+        .retransmitted_segments = retrans,
+        .input_errors = current.input_errors - previous.input_errors,
+        .output_resets = current.output_resets - previous.output_resets,
+        .retransmit_percent = out == 0 ? 0.0 :
+            static_cast<double>(retrans) / static_cast<double>(out) * 100.0,
+    };
+}
 
 std::optional<IbPortInterval> calculate_ib_interval(
     const IbPortSample& previous, const IbPortSample& current) {

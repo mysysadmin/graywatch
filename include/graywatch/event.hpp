@@ -52,10 +52,19 @@ struct IbPortEvent {
     IbPortInterval port;
 };
 
+struct TcpEvent {
+    static constexpr unsigned int schema_version = 1;
+
+    std::string timestamp;
+    double interval_seconds{};
+    TcpInterval interval;
+};
+
 std::string current_timestamp_utc();
 std::string to_json(const CpuPressureEvent& event);
 std::string to_json(const IoDeviceEvent& event);
 std::string to_json(const IbPortEvent& event);
+std::string to_json(const TcpEvent& event);
 std::string json_array(const std::vector<std::string>& values);
 
 }  // namespace graywatch

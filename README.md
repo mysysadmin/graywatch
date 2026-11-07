@@ -146,7 +146,11 @@ evidence boundaries, and
 cross-kernel, latency-injection and Quobyte correlation results.
 
 `status --resource network` currently returns one event per InfiniBand port.
-It reports logical and physical link state, configured rate, and interval
+It also returns a system-wide TCP event with interval segment counts,
+retransmissions, retransmission percentage, input errors and output resets.
+TCP is `unstable` when an interval has at least ten retransmissions and a
+retransmission ratio of at least 1%; the minimum count avoids noisy ratios from
+tiny samples. InfiniBand events report logical and physical link state, configured rate, and interval
 deltas for receive errors, transmit discards, symbol errors, link-down events
 and transmit-wait ticks. Conditions are `healthy`, `congested`, `degraded`, or
 `link_down`. A down unused port is still reported as evidence; Graywatch does
