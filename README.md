@@ -149,8 +149,13 @@ The default paths are:
 
 ```text
 /run/graywatch/graywatchd.sock
-/var/log/graywatch/events.jsonl
 ```
+
+Persistent interval logging is opt-in with `graywatchd --log PATH`. The default
+systemd service keeps current state in memory and publishes subscriptions but
+does not log every raw interval; doing so continuously can consume hundreds of
+megabytes per node per day. A later event policy will persist state transitions
+and degradation events without turning Graywatch into a time-series database.
 
 `noexec`, `nodev`, and `nosuid` mount options do not prevent Unix socket
 creation. Socket creation can fail when the filesystem is read-only, the daemon
