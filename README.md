@@ -97,7 +97,8 @@ Read the current PSI snapshot:
 
 The `psi` and `health` commands require `/proc/pressure`. The long-running
 daemon does not: it marks PSI unavailable and continues publishing its other
-resources.
+resources. `tasks` also continues without PSI and reports system CPU pressure
+as unavailable while retaining per-thread scheduler and blocked-state evidence.
 
 Measure interval stall percentages once per second, for five samples:
 

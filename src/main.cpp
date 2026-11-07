@@ -374,9 +374,18 @@ std::vector<graywatch::TaskSample> read_selected_tasks(const TaskOptions& option
     return graywatch::read_user_tasks(*options.uid);
 }
 
+std::vector<graywatch::PsiSample> read_optional_psi() {
+    try {
+        return graywatch::read_system_psi();
+    } catch (const std::exception&) {
+        return {};
+    }
+}
+
 void tasks(const TaskOptions& options) {
     auto previous = read_selected_tasks(options);
-    auto previous_psi = graywatch::read_system_psi();
+    auto previous_psi = read_optional_psi();
+    const bool psi_available = !previous_psi.empty();
     auto previous_time = std::chrono::steady_clock::now();
     if (previous.empty()) {
         throw std::runtime_error("no readable tasks matched the selection");
@@ -395,7 +404,7 @@ void tasks(const TaskOptions& options) {
         const auto current_time = std::chrono::steady_clock::now();
         const auto current = read_selected_tasks(options);
         const auto intervals = graywatch::calculate_task_intervals(previous, current);
-        const auto current_psi = graywatch::read_system_psi();
+        const auto current_psi = read_optional_psi();
         const double elapsed = std::chrono::duration<double>(
                                    current_time - previous_time)
                                    .count();
@@ -439,7 +448,7 @@ void tasks(const TaskOptions& options) {
         const graywatch::CpuPressureEvent event{
             .timestamp = graywatch::current_timestamp_utc(),
             .interval_seconds = elapsed,
-            .psi_available = true,
+            .psi_available = psi_available,
             .severity = std::clamp(cpu_some_percent / 100.0, 0.0, 1.0),
             .some_stall_percent = cpu_some_percent,
             .full_stall_percent = cpu_full_percent,
@@ -468,7 +477,8 @@ void tasks(const TaskOptions& options) {
         }
 
         std::cout << "SYSTEM_CPU condition="
-                  << (cpu_some_us == 0 ? "NO_PRESSURE" : "PRESSURE")
+                  << (!psi_available ? "UNAVAILABLE" :
+                      (cpu_some_us == 0 ? "NO_PRESSURE" : "PRESSURE"))
                   << " severity=" << event.severity
                   << " some_stall_percent=" << event.some_stall_percent
                   << " full_stall_percent=" << event.full_stall_percent
