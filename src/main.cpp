@@ -33,10 +33,15 @@ std::string upper_case(std::string_view text) {
     return result;
 }
 
+// `health`: a PSI stall share must exceed this (percent of the interval) to count
+// as anomalous, however unusual it is relative to the baseline.
+constexpr double default_minimum_stall_percent = 1.0;
+
 struct Options {
     bool watch{};
     double interval_seconds{1.0};
     unsigned int count{};
+    double minimum_stall_percent{default_minimum_stall_percent};
 };
 
 void usage() {
@@ -44,7 +49,7 @@ void usage() {
                  "  graywatchctl psi [--watch] [--interval SECONDS] "
                  "[--count SAMPLES]\n"
                  "  graywatchctl health [--interval SECONDS] "
-                 "[--count SAMPLES]\n"
+                 "[--count SAMPLES] [--min-stall PERCENT]\n"
                  "  graywatchctl tasks (-p PID | -u USER) "
                  "[--interval SECONDS] [--count SAMPLES] [--top THREADS] "
                  "[--json] [--log PATH]\n"
@@ -86,6 +91,14 @@ Options parse_options(int argc, char** argv, bool health_command) {
                 parse_positive_double(argv[++index], "--interval");
         } else if (argument == "--count" && index + 1 < argc) {
             options.count = parse_positive_unsigned(argv[++index], "--count");
+        } else if (argument == "--min-stall" && health_command && index + 1 < argc) {
+            const char* text = argv[++index];
+            std::size_t consumed{};
+            options.minimum_stall_percent = std::stod(text, &consumed);
+            if (text[consumed] != '\0' || options.minimum_stall_percent < 0.0 ||
+                options.minimum_stall_percent > 100.0) {
+                throw std::invalid_argument("--min-stall must be between 0 and 100");
+            }
         } else {
             throw std::invalid_argument("unknown or incomplete option: " +
                                         std::string(argument));
@@ -350,8 +363,10 @@ void health(const Options& options) {
 
         for (const auto& interval :
              graywatch::calculate_psi_intervals(previous, current, elapsed)) {
+            graywatch::DetectorConfig config;
+            config.minimum_anomaly = options.minimum_stall_percent;
             auto [position, inserted] = detectors.try_emplace(
-                Key{interval.resource, interval.scope});
+                Key{interval.resource, interval.scope}, config);
             (void)inserted;
             const auto detection = position->second.observe(interval.stall_percent);
             std::cout << interval.resource << ' ' << interval.scope
@@ -360,9 +375,19 @@ void health(const Options& options) {
                       << " baseline_mean=" << detection.baseline_mean
                       << " baseline_stddev=" << detection.baseline_stddev
                       << " threshold=" << detection.threshold
+                      << " threshold_source=" << (detection.floor_applied ? "floor" : "baseline")
                       << " samples=" << detection.baseline_samples;
             if (detection.anomalous) {
                 std::cout << " anomalous=yes z_score=" << detection.z_score;
+                if (detection.state == graywatch::HealthState::normal) {
+                    std::cout << " streak=" << detection.anomaly_streak << '/'
+                              << config.degrade_after;
+                }
+            }
+            if (detection.state == graywatch::HealthState::degraded &&
+                detection.recovery_streak != 0) {
+                std::cout << " recovery=" << detection.recovery_streak << '/'
+                          << config.recover_after;
             }
             if (detection.changed) {
                 std::cout << " transition="

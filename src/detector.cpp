@@ -53,7 +53,8 @@ RollingDetector::RollingDetector(DetectorConfig config) : config_(config) {
     if (config_.baseline_window == 0 || config_.minimum_baseline_samples == 0 ||
         config_.minimum_baseline_samples > config_.baseline_window ||
         config_.degrade_after == 0 || config_.recover_after == 0 ||
-        config_.sigma_threshold <= 0.0 || config_.minimum_stddev <= 0.0) {
+        config_.sigma_threshold <= 0.0 || config_.minimum_stddev <= 0.0 ||
+        !std::isfinite(config_.minimum_anomaly) || config_.minimum_anomaly < 0.0) {
         throw std::invalid_argument("invalid detector configuration");
     }
 }
@@ -63,12 +64,16 @@ Detection RollingDetector::observe(double value) {
         throw std::invalid_argument("observation must be finite and non-negative");
     }
 
+    // The sample is judged against the baseline as it was before the sample;
+    // the returned statistics are exactly the ones used for that decision.
     const HealthState previous_state = state_;
-    auto summary = summarize(baseline_);
-    double effective_stddev = std::max(summary.stddev, config_.minimum_stddev);
-    double threshold = summary.mean + config_.sigma_threshold * effective_stddev;
-    bool anomalous = baseline_.size() >= config_.minimum_baseline_samples &&
-                     value > threshold;
+    const auto summary = summarize(baseline_);
+    const std::size_t compared_samples = baseline_.size();
+    const double effective_stddev = std::max(summary.stddev, config_.minimum_stddev);
+    const double statistical = summary.mean + config_.sigma_threshold * effective_stddev;
+    const double threshold = std::max(statistical, config_.minimum_anomaly);
+    const bool anomalous =
+        compared_samples >= config_.minimum_baseline_samples && value > threshold;
 
     if (state_ == HealthState::learning) {
         add_to_baseline(value);
@@ -100,9 +105,6 @@ Detection RollingDetector::observe(double value) {
         }
     }
 
-    summary = summarize(baseline_);
-    effective_stddev = std::max(summary.stddev, config_.minimum_stddev);
-    threshold = summary.mean + config_.sigma_threshold * effective_stddev;
     return {
         .state = state_,
         .previous_state = previous_state,
@@ -112,8 +114,11 @@ Detection RollingDetector::observe(double value) {
         .baseline_mean = summary.mean,
         .baseline_stddev = summary.stddev,
         .threshold = threshold,
+        .floor_applied = config_.minimum_anomaly > statistical,
         .z_score = (value - summary.mean) / effective_stddev,
-        .baseline_samples = baseline_.size(),
+        .baseline_samples = compared_samples,
+        .anomaly_streak = anomaly_streak_,
+        .recovery_streak = recovery_streak_,
     };
 }
 

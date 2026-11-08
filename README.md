@@ -301,24 +301,74 @@ Run the first adaptive health detector:
 ./build/graywatchctl health --interval 1 --count 20
 ```
 
-Each `(resource, scope)` stream learns independently. The initial state is
-`LEARNING`; after ten samples it becomes `NORMAL`. The baseline is a rolling
-window of the last 60 accepted samples. A sample is provisionally anomalous
-when it exceeds the baseline mean by three standard deviations (the deviation
-is floored at 0.01 percentage points), and three consecutive anomalies produce
-`DEGRADED`. Three consecutive normal observations are required for recovery.
-Candidate anomalies and observations made while degraded are not added to the
-baseline; only the observation that completes recovery is.
+`health` is an experimental detector. It flags stalls that are both unusual
+for this machine *and* large enough to matter. It runs only in this command:
+the daemon does not use it and publishes only the absolute guardrails
+described below.
 
-Every sample seen while `LEARNING` is accepted unconditionally, so a stream
-that starts during an incident learns the incident as its baseline. Start the
-command while the system is behaving normally. This detector is only used by
-`graywatchctl health`, which needs PSI. The daemon does not run it and
-publishes only the absolute guardrails described below.
+#### How `health` decides
 
-These statistical parameters are intentionally detector configuration, not
-resource-specific operational thresholds. They are provisional and remain
-visible in the output so their behavior can be evaluated rather than assumed.
+Every interval (`--interval`, default 1 s) the command reads `/proc/pressure`
+and computes six stall shares: `cpu`, `memory` and `io`, each as `some` (at
+least one task stalled) and `full` (all non-idle tasks stalled at once). Each
+share is a percentage of the interval: `0.32` means 0.32%, i.e. 3.2 ms of a
+second. Each of the six series has its own detector:
+
+1. **Learning.** The first 10 samples are accepted into the baseline
+   unconditionally, and the state is `LEARNING`. Start the command while the
+   system behaves normally: a stream that starts during an incident learns the
+   incident as its baseline.
+2. **Baseline.** The rolling window of the last 60 *accepted* samples. Its
+   mean and sample standard deviation are reported as `baseline_mean` and
+   `baseline_stddev`.
+3. **Threshold.** The larger of two limits. `threshold_source` says which one
+   applied:
+   - `baseline`: `mean + 3 × max(stddev, 0.01)`, i.e. "unusual for this
+     machine";
+   - `floor`: `--min-stall` (default 1%), i.e. "large enough to matter". On a
+     quiet machine the baseline is near zero, so without the floor a few
+     milliseconds of activity would look like a many-sigma anomaly.
+4. **Anomalous** means `current > threshold`, once the baseline has 10
+   samples. The line then shows `anomalous=yes` with the `z_score`,
+   `(current − mean) / max(stddev, 0.01)`.
+5. **State changes.**
+   - `NORMAL` becomes `DEGRADED` after 3 consecutive anomalous samples.
+     `streak=N/3` counts them.
+   - `DEGRADED` returns to `NORMAL` after 3 consecutive normal samples.
+     `recovery=N/3` counts them.
+   - `transition=OLD->NEW` marks the sample that changed the state.
+6. **Baseline protection.** Anomalous samples, and every sample while
+   `DEGRADED`, are kept out of the baseline, so a lasting problem cannot become
+   the new normal. Only the sample that completes recovery is added.
+
+Every number on a line describes the comparison that was actually made: the
+baseline as it was *before* this sample. `samples` is its size. A series whose
+`samples` stops growing while the others continue has had anomalous samples.
+
+An idle node with the default floor (`samples` keeps growing; nothing is
+anomalous):
+
+```text
+cpu some state=NORMAL current=0.09 baseline_mean=0.14 baseline_stddev=0.08 threshold=1.00 threshold_source=floor samples=12
+io some state=NORMAL current=0.00 baseline_mean=0.00 baseline_stddev=0.01 threshold=1.00 threshold_source=floor samples=12
+```
+
+The same node with `--min-stall 0`, the purely statistical behaviour:
+
+```text
+cpu some state=NORMAL current=0.10 baseline_mean=0.16 baseline_stddev=0.07 threshold=0.37 threshold_source=baseline samples=11
+io some state=NORMAL current=0.00 baseline_mean=0.00 baseline_stddev=0.00 threshold=0.03 threshold_source=baseline samples=10
+```
+
+Here `io` has one sample fewer than `cpu`. One earlier I/O sample exceeded the
+0.03% statistical threshold and was kept out of the baseline. With an all-zero
+baseline, any measurable I/O stall does that. With the default floor it would
+only count if it reached 1%.
+
+The window (60), learning size (10), 3σ, the 0.01 deviation floor and the 3/3
+streaks are fixed detector parameters. Only `--min-stall` is configurable.
+They are provisional, and they are printed so their behaviour can be
+evaluated rather than assumed.
 
 Inspect CPU scheduling delay for one process or all processes owned by a user:
 
@@ -390,6 +440,17 @@ Unix-domain socket:
 CPU and memory `status` return one current schema-v1 JSON event; I/O and
 network status return JSON arrays because a machine can have several devices or
 interfaces.
+
+`status` describes only the **most recent interval**, by default the last
+second, not the time since the daemon started. The daemon samples every
+interval, replaces the previous event, and keeps no history. CPU thread
+attribution (`affected_threads`, `waiting_threads`) is refreshed every
+`--task-interval` seconds (5 on the playground service);
+`attribution_age_seconds` shows how old it is. The exceptions are deliberate
+lifetime facts, such as whether an InfiniBand port was ever active or ever
+carried traffic. To see a time window, use `subscribe` (every event as it
+happens) or the support collector, which records every interval to
+`events.jsonl` and summarizes the window in `report.txt`.
 `subscribe` remains connected and prints future events matching both the
 resource and minimum severity. Use `--resource all` (the default) for every
 resource and add `--count N` for a bounded subscription. The protocol supports `GET` (CPU), `GET io`, `GET memory`, `GET network`
