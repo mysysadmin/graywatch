@@ -713,17 +713,29 @@ device with its condition. With none, it shows the busiest healthy device at
 1% busy or more, otherwise `-`. Add `--json` when
 the snapshot should be attached to a support case or processed by another tool.
 
-Example output:
+Example output from the idle playground:
 
 ```text
-HOST                   CPU/PSI                WAIT TOP THREAD                 MEMORY                 BUSIEST DEVICE                     NETWORK
-nodea                  pressure/psi            819 M-Flease-8:6.3ms           -                      dm-0:0.0% r=0.00ms w=0.00ms        mlx4_0/2:link_down
-nodeb                  pressure/psi           1031 ZDirector:4.8ms            -                      -                                  mlx4_0/1:congested +1
-noded                  pressure/psi            405 D-mFlease:6.5ms            -                      -                                  healthy
+HOST                   CPU/PSI                WAIT TOP THREAD                 MEMORY                 DEVICE                             NETWORK
+nodea                  no_pressure/psi         841 M-Flease-8:5.7ms           healthy avail=89%      -                                  healthy
+nodeb                  no_pressure/psi        1072 R-Flease-3:5.2ms           healthy avail=88%      -                                  healthy
+nodec                  no_pressure/psi        1044 ZDirector:5.0ms            healthy avail=88%      -                                  healthy
+noded                  no_pressure/psi         409 ZDirector:5.3ms            healthy avail=91%      -                                  healthy
 ```
 
-`-` in MEMORY means the remote daemon predates the memory resource (here, the
-playground's installed packages); `+1` counts further network issues.
+The same nodea while 144 busy loops and a read-only `fio` random read on
+`nvme0n1` ran:
+
+```text
+HOST                   CPU/PSI                WAIT TOP THREAD                 MEMORY                 DEVICE                             NETWORK
+nodea                  pressure/psi            667 sh:3397.7ms                healthy avail=89%      nvme0n1:saturated 100.0% r=0.46ms w=0.00ms healthy
+```
+
+WAIT counts threads that waited for a CPU in the last attribution interval;
+on a busy host most of them wait microseconds, so read it together with
+CPU/PSI and the top thread's wait. `-` in MEMORY means the remote daemon
+predates the memory resource, and `+N` after a network issue counts further
+issues.
 
 ## Current boundaries and next work
 
