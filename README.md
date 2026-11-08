@@ -826,26 +826,28 @@ SSH runs with `BatchMode=yes`, so key-based access is required.
 availability, waiting-thread counts, the thread with the largest absolute
 scheduler wait, memory condition, one block device, FUSE state, and current
 TCP/InfiniBand issues. Never-used `inactive` ports are not listed as issues.
-The DEVICE column shows the most severe `congested`, `saturated` or `degraded`
+Each column is as wide as its widest value. The DEVICE column shows the most severe `congested`, `saturated` or `degraded`
 device with its condition. With none, it shows the busiest healthy device at
 1% busy or more, otherwise `-`. The FUSE column shows `STALLED <mount> <s>s`
 for a stalled mount (with `+N` for more), else `active w=N` (N requests
-waiting), `idle`, `no-access` when the daemon cannot read fusectl, or `-`
-when it predates the FUSE resource. Add `--json` when
+waiting), `idle`, `no-access` when the daemon cannot read fusectl (see the FUSE
+resource above), or `-` when the host has no FUSE mount or its daemon predates
+the FUSE resource. Add `--json` when
 the snapshot should be attached to a support case or processed by another tool.
 
-Example output from the idle playground:
+Example output from the idle playground (nodea, nodeb, nodec, noded by
+address):
 
 ```text
-HOST                   CPU/PSI                WAIT TOP THREAD                 MEMORY                 DEVICE                             NETWORK
-nodea                  no_pressure/psi         841 M-Flease-8:5.7ms           healthy avail=89%      -                                  healthy
-nodeb                  no_pressure/psi        1072 R-Flease-3:5.2ms           healthy avail=88%      -                                  healthy
-nodec                  no_pressure/psi        1044 ZDirector:5.0ms            healthy avail=88%      -                                  healthy
-noded                  no_pressure/psi         409 ZDirector:5.3ms            healthy avail=91%      -                                  healthy
+HOST            CPU/PSI          WAIT  TOP THREAD                 MEMORY             DEVICE                       FUSE       NETWORK
+192.168.65.160  no_pressure/psi   861  M-Flease-8:5.7ms           healthy avail=66%  -                            no-access  healthy
+192.168.65.153  no_pressure/psi  1070  kworker/28:0-events:5.3ms  healthy avail=33%  -                            no-access  healthy
+192.168.65.157  no_pressure/psi  1048  kworker/16:0-events:5.1ms  healthy avail=22%  -                            no-access  healthy
+192.168.65.142  no_pressure/psi   533  ZDirector:5.0ms            healthy avail=79%  dm-0:3.8% r=0.00ms w=1.76ms  -          healthy
 ```
 
 The same nodea while 144 busy loops and a read-only `fio` random read on
-`nvme0n1` ran:
+`nvme0n1` ran (recorded with fixed column widths, before the FUSE column was added):
 
 ```text
 HOST                   CPU/PSI                WAIT TOP THREAD                 MEMORY                 DEVICE                             NETWORK

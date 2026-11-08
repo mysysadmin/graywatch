@@ -154,20 +154,12 @@ std::string compact_network(const std::vector<const json::Value*>& issues) {
     return text;
 }
 
-std::string pad(std::string text, std::size_t width, bool right = false) {
-    if (text.size() >= width) return text;
-    return right ? std::string(width - text.size(), ' ') + text
-                 : text + std::string(width - text.size(), ' ');
-}
-
 void print_table(const std::vector<Row>& rows) {
-    std::cout << pad("HOST", 22) << ' ' << pad("CPU/PSI", 20) << ' ' << pad("WAIT", 6, true)
-              << ' ' << pad("TOP THREAD", 26) << ' ' << pad("MEMORY", 22) << ' '
-              << pad("DEVICE", 34) << ' ' << pad("FUSE", 24) << " NETWORK\n";
+    std::vector<std::vector<std::string>> table{
+        {"HOST", "CPU/PSI", "WAIT", "TOP THREAD", "MEMORY", "DEVICE", "FUSE", "NETWORK"}};
     for (const auto& row : rows) {
         if (!row.reachable) {
-            std::cout << pad(row.host, 22) << ' ' << pad("UNREACHABLE", 20) << ' '
-                      << pad("-", 6, true) << ' ' << row.error << '\n';
+            table.push_back({row.host, "UNREACHABLE", "-", row.error});
             continue;
         }
         const bool psi = row.cpu["evidence"].boolean("psi_available", false);
@@ -192,13 +184,11 @@ void print_table(const std::vector<Row>& rows) {
                      fixed(evidence.number("average_read_latency_ms", 0), 2) + "ms w=" +
                      fixed(evidence.number("average_write_latency_ms", 0), 2) + "ms";
         }
-        std::cout << pad(row.host, 22) << ' ' << pad(cpu, 20) << ' '
-                  << pad(fixed(row.cpu["selection"].number("waiting_threads", 0), 0), 6, true)
-                  << ' ' << pad(thread_text, 26) << ' ' << pad(memory, 22) << ' '
-                  << pad(device, 34) << ' ' << pad(fuse_summary(row.fuse), 24) << ' '
-                  << compact_network(network_issues(row.network))
-                  << '\n';
+        table.push_back({row.host, cpu, fixed(row.cpu["selection"].number("waiting_threads", 0), 0),
+                         thread_text, memory, device, fuse_summary(row.fuse),
+                         compact_network(network_issues(row.network))});
     }
+    std::cout << format_columns(table, {2});
 }
 
 void print_json(const std::vector<Row>& rows) {
@@ -309,6 +299,37 @@ const json::Value* notable_device(const json::Value& io) {
         }
     }
     return problem ? problem : busiest;
+}
+
+std::string format_columns(const std::vector<std::vector<std::string>>& rows,
+                           const std::vector<std::size_t>& right_aligned) {
+    if (rows.empty()) return {};
+    const std::size_t columns = rows.front().size();
+    // Only cells followed by another cell are padded, so they alone set widths.
+    std::vector<std::size_t> widths(columns, 0);
+    for (const auto& row : rows) {
+        for (std::size_t column = 0; column + 1 < row.size() && column < columns; ++column) {
+            widths[column] = std::max(widths[column], row[column].size());
+        }
+    }
+    std::string output;
+    for (const auto& row : rows) {
+        std::string line;
+        for (std::size_t column = 0; column < row.size(); ++column) {
+            const auto& cell = row[column];
+            if (column + 1 == row.size()) {
+                line += cell;
+                break;
+            }
+            const std::string fill(widths[column] - cell.size(), ' ');
+            const bool right = std::find(right_aligned.begin(), right_aligned.end(), column) !=
+                               right_aligned.end();
+            line += (right ? fill + cell : cell + fill) + "  ";
+        }
+        while (!line.empty() && line.back() == ' ') line.pop_back();
+        output += line + '\n';
+    }
+    return output;
 }
 
 int run_cluster(int argc, char** argv, int first_argument) {

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
+#include <vector>
 
 namespace graywatch {
 
@@ -28,5 +30,12 @@ const json::Value* notable_device(const json::Value& io);
 // flight, "idle", "no-access" when the daemon cannot read fusectl (it runs
 // unprivileged), or "-" without FUSE mounts or an older daemon.
 std::string fuse_summary(const json::Value& fuse);
+
+// Lay out a table: each column is as wide as its widest cell, columns are
+// separated by two spaces, and the last column is not padded. Columns listed
+// in RIGHT_ALIGNED are right-aligned. A row may have fewer cells than the
+// header; its last cell then runs to the end of the line.
+std::string format_columns(const std::vector<std::vector<std::string>>& rows,
+                           const std::vector<std::size_t>& right_aligned = {});
 
 }  // namespace graywatch

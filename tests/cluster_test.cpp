@@ -41,6 +41,21 @@ int main() {
                      device("nvme2n1", "degraded", 0.85, 5)) == "nvme2n1",
                 "most severe unhealthy device not chosen");
         require(pick("") == "-", "empty device list");
+
+        // Columns grow to their widest cell, so a long thread name cannot
+        // shift the columns after it; short rows end with a free-form cell.
+        const auto table = graywatch::format_columns(
+            {{"HOST", "WAIT", "TOP THREAD", "NETWORK"},
+             {"nodea", "5", "kworker/10:1-cgroup_destroy:5.6ms", "healthy"},
+             {"nodeb", "1064", "sh:1.0ms", "ib0/1:congested"},
+             {"nodec", "-", "Host key verification failed."}},
+            {1});
+        require(table ==
+                    "HOST   WAIT  TOP THREAD                         NETWORK\n"
+                    "nodea     5  kworker/10:1-cgroup_destroy:5.6ms  healthy\n"
+                    "nodeb  1064  sh:1.0ms                           ib0/1:congested\n"
+                    "nodec     -  Host key verification failed.\n",
+                "column layout");
     } catch (const std::exception& error) {
         std::cerr << "cluster_test: " << error.what() << '\n';
         return 1;
