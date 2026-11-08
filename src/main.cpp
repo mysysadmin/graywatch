@@ -25,6 +25,14 @@
 
 namespace {
 
+std::string upper_case(std::string_view text) {
+    std::string result(text);
+    for (auto& character : result) {
+        if (character >= 'a' && character <= 'z') character = static_cast<char>(character - 'a' + 'A');
+    }
+    return result;
+}
+
 struct Options {
     bool watch{};
     double interval_seconds{1.0};
@@ -416,11 +424,9 @@ void tasks(const TaskOptions& options) {
 
         double cpu_some_percent{};
         double cpu_full_percent{};
-        std::uint64_t cpu_some_us{};
         for (const auto& interval : pressure) {
             if (interval.resource == "cpu" && interval.scope == "some") {
                 cpu_some_percent = interval.stall_percent;
-                cpu_some_us = interval.stalled_us;
             } else if (interval.resource == "cpu" && interval.scope == "full") {
                 cpu_full_percent = interval.stall_percent;
             }
@@ -480,8 +486,7 @@ void tasks(const TaskOptions& options) {
         }
 
         std::cout << "SYSTEM_CPU condition="
-                  << (!psi_available ? "UNAVAILABLE" :
-                      (cpu_some_us == 0 ? "NO_PRESSURE" : "PRESSURE"))
+                  << upper_case(graywatch::cpu_pressure_condition(psi_available, event.some_stall_percent))
                   << " severity=" << event.severity
                   << " some_stall_percent=" << event.some_stall_percent
                   << " full_stall_percent=" << event.full_stall_percent

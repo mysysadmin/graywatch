@@ -640,8 +640,12 @@ uses `/run`, not `/tmp`.
 ```
 
 - `schema_version` defines the compatibility contract for consumers.
-- `condition=pressure` means the CPU PSI `some` counter advanced during the
-  interval; it does not by itself mean the machine is unhealthy.
+- `condition=pressure` means runnable tasks waited for a CPU during at least
+  10% of the interval (PSI `some` >= 10%, the same threshold as memory).
+  Below that the condition is `no_pressure`. Small stall shares are normal
+  scheduling noise on a busy host, and the exact share remains in `severity`
+  and `psi_some_stall_percent`. Pressure alone does not mean the machine is
+  unhealthy.
 - `severity=0.86` means that during 86% of the interval at least one runnable
   task was waiting for CPU. It is a direct measurement, not a baseline score.
 - `interval_seconds` is the actual monotonic-clock sampling duration.
@@ -700,10 +704,13 @@ graywatchctl cluster HOST... [--user USER] [--timeout SECONDS]
 
 SSH runs with `BatchMode=yes`, so key-based access is required.
 `--remote-command` names the `graywatchctl` on the remote host (default
-`graywatchctl` on `PATH`). The snapshot summarizes PSI availability,
-waiting-thread counts, the thread with the largest absolute scheduler wait,
-memory condition, the busiest active block device, and current TCP/InfiniBand
-issues; never-used `inactive` ports are not listed as issues. Add `--json` when
+`/usr/bin/graywatchctl`). The snapshot summarizes the CPU condition and PSI
+availability, waiting-thread counts, the thread with the largest absolute
+scheduler wait, memory condition, one block device, and current
+TCP/InfiniBand issues. Never-used `inactive` ports are not listed as issues.
+The DEVICE column shows the most severe `congested`, `saturated` or `degraded`
+device with its condition. With none, it shows the busiest healthy device at
+1% busy or more, otherwise `-`. Add `--json` when
 the snapshot should be attached to a support case or processed by another tool.
 
 Example output:

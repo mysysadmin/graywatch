@@ -35,4 +35,13 @@ std::vector<PsiInterval> calculate_psi_intervals(
     const std::vector<PsiSample>& current,
     double elapsed_seconds);
 
+// System CPU PSI `some` share at or above which an interval is reported as
+// `pressure`. Below it, stalls are normal scheduling noise on a busy host (a
+// fraction of a percent on an idle 72-CPU node); the exact share remains in
+// the event evidence and severity. Matches the memory PSI threshold.
+inline constexpr double cpu_pressure_threshold_percent = 10.0;
+
+// "unavailable", "no_pressure" or "pressure".
+std::string_view cpu_pressure_condition(bool psi_available, double some_stall_percent);
+
 }  // namespace graywatch

@@ -66,6 +66,24 @@ int main() {
                 "blocked thread count is absent");
         require(json.find("request_wait_answer") != std::string::npos,
                 "wait channel is absent");
+        require(json.find("\"condition\":\"pressure\"") != std::string::npos,
+                "75% CPU stall is not pressure");
+
+        // Background scheduling noise (fractions of a percent) is not pressure.
+        auto noise = event;
+        noise.some_stall_percent = 0.057;
+        noise.severity = 0.00057;
+        require(graywatch::to_json(noise).find("\"condition\":\"no_pressure\"") !=
+                    std::string::npos,
+                "CPU stall noise reported as pressure");
+        noise.some_stall_percent = 10.0;
+        require(graywatch::to_json(noise).find("\"condition\":\"pressure\"") !=
+                    std::string::npos,
+                "CPU stall at the threshold is not pressure");
+        noise.psi_available = false;
+        require(graywatch::to_json(noise).find("\"condition\":\"unavailable\"") !=
+                    std::string::npos,
+                "missing PSI not reported as unavailable");
 
         const graywatch::IoDeviceEvent io_event{
             .timestamp = "2026-11-06T12:34:56.789Z",

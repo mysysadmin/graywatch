@@ -117,6 +117,11 @@ if(BUILD_TESTING)
     target_compile_options(memory_stats_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME memory_stats COMMAND memory_stats_test)
 
+    add_executable(cluster_test tests/cluster_test.cpp)
+    target_link_libraries(cluster_test PRIVATE graywatch_core)
+    target_compile_options(cluster_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME cluster_summary COMMAND cluster_test)
+
     add_executable(report_test tests/report_test.cpp)
     target_link_libraries(report_test PRIVATE graywatch_core)
     target_compile_options(report_test PRIVATE -Wall -Wextra -Wpedantic -Werror)

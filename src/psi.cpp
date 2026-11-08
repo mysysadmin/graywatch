@@ -103,4 +103,9 @@ std::vector<PsiInterval> calculate_psi_intervals(
     return intervals;
 }
 
+std::string_view cpu_pressure_condition(bool psi_available, double some_stall_percent) {
+    if (!psi_available) return "unavailable";
+    return some_stall_percent >= cpu_pressure_threshold_percent ? "pressure" : "no_pressure";
+}
+
 }  // namespace graywatch

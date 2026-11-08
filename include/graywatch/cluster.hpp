@@ -2,10 +2,23 @@
 
 namespace graywatch {
 
+namespace json {
+class Value;
+}
+
 // `graywatchctl cluster HOST... [--user USER] [--timeout SECONDS]
 // [--remote-command PATH] [--socket PATH] [--json]`: query graywatchd on each
 // host over SSH in parallel and print a one-line summary per host. Returns 0
 // when every host answered, 1 otherwise.
 int run_cluster(int argc, char** argv, int first_argument);
+
+// Busy share below which a healthy device is not worth showing in the summary.
+inline constexpr double cluster_minimum_busy_percent = 1.0;
+
+// The device the cluster summary shows from a `status --resource io` array:
+// the most severe congested, saturated or degraded device; otherwise the
+// busiest healthy device at or above cluster_minimum_busy_percent; otherwise
+// none (nullptr).
+const json::Value* notable_device(const json::Value& io);
 
 }  // namespace graywatch

@@ -1,5 +1,7 @@
 #include "graywatch/event.hpp"
 
+#include "graywatch/psi.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <ctime>
@@ -75,9 +77,7 @@ std::string to_json(const CpuPressureEvent& event) {
            << ",\"event_type\":\"resource_pressure\",\"timestamp\":";
     json_string(output, event.timestamp);
     output << ",\"resource\":\"cpu\",\"condition\":\""
-           << (!event.psi_available
-                   ? "unavailable"
-                   : (event.some_stall_percent == 0.0 ? "no_pressure" : "pressure"))
+           << cpu_pressure_condition(event.psi_available, event.some_stall_percent)
            << "\",\"severity\":" << event.severity
            << ",\"interval_seconds\":" << event.interval_seconds
            << ",\"evidence\":{\"psi_available\":"

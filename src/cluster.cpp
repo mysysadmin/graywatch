@@ -132,18 +132,6 @@ const json::Value* top_thread(const json::Value& cpu) {
     return best;
 }
 
-const json::Value* busiest(const json::Value& io) {
-    const json::Value* best = nullptr;
-    for (const auto& device : io.array()) {
-        if (device.string("condition") == "idle") continue;
-        if (!best || device["evidence"].number("busy_percent", 0) >
-                         (*best)["evidence"].number("busy_percent", 0)) {
-            best = &device;
-        }
-    }
-    return best;
-}
-
 std::vector<const json::Value*> network_issues(const json::Value& network) {
     std::vector<const json::Value*> issues;
     for (const auto& item : network.array()) {
@@ -173,7 +161,7 @@ std::string pad(std::string text, std::size_t width, bool right = false) {
 void print_table(const std::vector<Row>& rows) {
     std::cout << pad("HOST", 22) << ' ' << pad("CPU/PSI", 20) << ' ' << pad("WAIT", 6, true)
               << ' ' << pad("TOP THREAD", 26) << ' ' << pad("MEMORY", 22) << ' '
-              << pad("BUSIEST DEVICE", 34) << " NETWORK\n";
+              << pad("DEVICE", 34) << " NETWORK\n";
     for (const auto& row : rows) {
         if (!row.reachable) {
             std::cout << pad(row.host, 22) << ' ' << pad("UNREACHABLE", 20) << ' '
@@ -193,9 +181,11 @@ void print_table(const std::vector<Row>& rows) {
                      fixed(evidence.number("available_percent", 0), 0) + "%";
         }
         std::string device = "-";
-        if (const auto* busy = busiest(row.io)) {
-            const auto& evidence = (*busy)["evidence"];
-            device = (*busy)["device"].string("name") + ":" +
+        if (const auto* notable = notable_device(row.io)) {
+            const auto& evidence = (*notable)["evidence"];
+            const auto& condition = notable->string("condition");
+            device = (*notable)["device"].string("name") + ":" +
+                     (condition == "healthy" ? std::string() : condition + " ") +
                      fixed(evidence.number("busy_percent", 0), 1) + "% r=" +
                      fixed(evidence.number("average_read_latency_ms", 0), 2) + "ms w=" +
                      fixed(evidence.number("average_write_latency_ms", 0), 2) + "ms";
@@ -266,6 +256,27 @@ void print_json(const std::vector<Row>& rows) {
 }
 
 }  // namespace
+
+const json::Value* notable_device(const json::Value& io) {
+    const json::Value* problem = nullptr;
+    const json::Value* busiest = nullptr;
+    for (const auto& device : io.array()) {
+        const auto& condition = device.string("condition");
+        if (condition == "idle") continue;
+        if (condition != "healthy") {
+            if (!problem || device.number("severity", 0) > problem->number("severity", 0)) {
+                problem = &device;
+            }
+            continue;
+        }
+        const double busy = device["evidence"].number("busy_percent", 0);
+        if (busy >= cluster_minimum_busy_percent &&
+            (!busiest || busy > (*busiest)["evidence"].number("busy_percent", 0))) {
+            busiest = &device;
+        }
+    }
+    return problem ? problem : busiest;
+}
 
 int run_cluster(int argc, char** argv, int first_argument) {
     const auto options = parse(argc, argv, first_argument);
