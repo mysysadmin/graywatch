@@ -1,5 +1,6 @@
 #include "graywatch/block_stats.hpp"
 #include "graywatch/event.hpp"
+#include "graywatch/fuse_stats.hpp"
 #include "graywatch/io_health.hpp"
 #include "graywatch/memory_stats.hpp"
 #include "graywatch/network_stats.hpp"
@@ -158,7 +159,8 @@ void handle_command(Client& client, std::string_view command,
                     const std::optional<std::string>& current_event,
                     const std::vector<std::string>& current_io_events,
                     const std::vector<std::string>& current_network_events,
-                    const std::optional<std::string>& current_memory_event) {
+                    const std::optional<std::string>& current_memory_event,
+                    const std::vector<std::string>& current_fuse_events) {
     if (command == "GET") {
         if (current_event) {
             (void)send_line(client.fd, *current_event);
@@ -182,6 +184,10 @@ void handle_command(Client& client, std::string_view command,
         (void)send_line(client.fd, graywatch::json_array(current_network_events));
         return;
     }
+    if (command == "GET fuse") {
+        (void)send_line(client.fd, graywatch::json_array(current_fuse_events));
+        return;
+    }
     constexpr std::string_view prefix = "SUBSCRIBE ";
     if (command.starts_with(prefix)) {
         try {
@@ -192,7 +198,7 @@ void handle_command(Client& client, std::string_view command,
             if (!(input >> severity) ||
                 ((input >> resource) && resource != "all" && resource != "cpu" &&
                  resource != "io" && resource != "network" &&
-                 resource != "memory") ||
+                 resource != "memory" && resource != "fuse") ||
                 (input >> extra) || severity < 0.0 || severity > 1.0) {
                 throw std::invalid_argument("range");
             }
@@ -329,6 +335,8 @@ int main(int argc, char** argv) {
         std::vector<std::string> current_io_events;
         std::vector<std::string> current_network_events;
         std::optional<std::string> current_memory_event;
+        std::vector<std::string> current_fuse_events;
+        graywatch::FuseTracker fuse_tracker;
         std::set<std::string> ib_ports_seen_active;
         auto previous = read_available_psi();
         auto previous_memory = read_available_memory();
@@ -415,7 +423,8 @@ int main(int argc, char** argv) {
                     clients[index].input.erase(0, newline + 1);
                     handle_command(clients[index], command, current_event,
                                    current_io_events, current_network_events,
-                                   current_memory_event);
+                                   current_memory_event,
+                                   current_fuse_events);
                 }
             }
             clients.erase(std::remove_if(clients.begin(), clients.end(),
@@ -573,6 +582,26 @@ int main(int argc, char** argv) {
                         port, network_event.in_use).severity;
                     for (auto& client : clients) {
                         if (wants_event(client, "network", severity) &&
+                            !send_line(client.fd, json)) {
+                            close(client.fd);
+                            client.fd = -1;
+                        }
+                    }
+                }
+                // FUSE: requests the daemon of each fuse mount has not answered.
+                current_fuse_events.clear();
+                for (const auto& sample : graywatch::read_fuse_samples()) {
+                    const graywatch::FuseEvent fuse_event{
+                        .timestamp = graywatch::current_timestamp_utc(),
+                        .interval_seconds = elapsed,
+                        .sample = sample,
+                        .assessment = fuse_tracker.observe(sample, elapsed),
+                    };
+                    auto json = graywatch::to_json(fuse_event);
+                    current_fuse_events.push_back(json);
+                    if (log) log << json << '\n' << std::flush;
+                    for (auto& client : clients) {
+                        if (wants_event(client, "fuse", fuse_event.assessment.severity) &&
                             !send_line(client.fd, json)) {
                             close(client.fd);
                             client.fd = -1;

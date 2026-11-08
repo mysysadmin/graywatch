@@ -502,6 +502,24 @@ std::map<__u32, std::string> fuse_mounts() {
     return mounts;
 }
 
+// Block request operation (REQ_OP_*, the low byte of cmd_flags). Values are
+// stable across 5.14 and 6.x for the ones named here; drv_in/drv_out are
+// driver pass-through commands (SG_IO, NVMe admin/passthru: SMART, vendor
+// queries), not data I/O.
+std::string block_operation(__u32 operation) {
+    switch (operation) {
+        case 0: return "read";
+        case 1: return "write";
+        case 2: return "flush";
+        case 3: return "discard";
+        case 5: return "secure_erase";
+        case 9: return "write_zeroes";
+        case 34: return "drv_in";
+        case 35: return "drv_out";
+        default: return "op" + std::to_string(operation);
+    }
+}
+
 const char* fuse_opcode(__u32 opcode) {
     static const std::map<__u32, const char*> names{
         {1, "LOOKUP"}, {2, "FORGET"}, {3, "GETATTR"}, {4, "SETATTR"}, {5, "READLINK"},
@@ -564,6 +582,93 @@ bool thread_in_state(__u32 tid, char wanted) {
 
 bool thread_exists(__u32 tid) {
     return std::filesystem::exists("/proc/" + std::to_string(tid));
+}
+
+// --- FUSE requests already waiting when the helper attached -----------------
+// The probes time a request from the moment it is sent, so a request sent
+// before the helper started (a stall already in progress) is invisible to
+// them. Such waiters are found once from their kernel stacks.
+
+// Function names of a task's kernel stack, innermost first (root only).
+std::vector<std::string> kernel_stack(__u32 tid) {
+    std::ifstream input("/proc/" + std::to_string(tid) + "/stack");
+    std::vector<std::string> frames;
+    std::string line;
+    while (std::getline(input, line)) {
+        // "[<0>] fuse_create_open+0x223/0x530 [fuse]"
+        const auto start = line.find("] ");
+        if (start == std::string::npos) continue;
+        const auto end = line.find('+', start);
+        frames.push_back(line.substr(start + 2, end == std::string::npos ? std::string::npos
+                                                                         : end - start - 2));
+    }
+    return frames;
+}
+
+bool waiting_on_fuse(const std::vector<std::string>& frames) {
+    return std::find(frames.begin(), frames.end(), "request_wait_answer") != frames.end();
+}
+
+// The FUSE operation implied by the callers of the request; 0 if unknown.
+__u32 fuse_opcode_from_stack(const std::vector<std::string>& frames) {
+    static const std::vector<std::pair<const char*, __u32>> callers{
+        {"fuse_create_open", 35}, {"fuse_atomic_open", 35}, {"fuse_tmpfile", 51},
+        {"fuse_mknod", 8}, {"fuse_mkdir", 9}, {"fuse_unlink", 10}, {"fuse_rmdir", 11},
+        {"fuse_rename_common", 45}, {"fuse_rename2", 45}, {"fuse_link", 13},
+        {"fuse_symlink", 6}, {"fuse_lookup_name", 1}, {"fuse_lookup", 1},
+        {"fuse_do_getattr", 3}, {"fuse_do_statx", 52}, {"fuse_do_setattr", 4},
+        {"fuse_do_open", 14}, {"fuse_file_open", 14}, {"fuse_readdir", 28},
+        {"fuse_fsync_common", 20}, {"fuse_fsync", 20}, {"fuse_flush", 25},
+        {"fuse_send_write", 16}, {"fuse_perform_write", 16}, {"fuse_send_read", 15},
+        {"fuse_do_readfolio", 15}, {"fuse_do_readpage", 15}, {"fuse_statfs", 17},
+        {"fuse_getxattr", 22}, {"fuse_listxattr", 23}, {"fuse_setxattr", 21},
+        {"fuse_removexattr", 24}, {"fuse_access", 34}, {"fuse_file_fallocate", 43},
+        {"fuse_readlink_page", 5}, {"fuse_get_link", 5}};
+    for (const auto& frame : frames) {
+        for (const auto& [name, opcode] : callers) {
+            if (frame == name) return opcode;
+        }
+    }
+    return 0;
+}
+
+// When the task last ran, as CLOCK_MONOTONIC nanoseconds: se.exec_start in
+// /proc/TID/sched (CONFIG_SCHED_DEBUG). For a task asleep since it sent the
+// request this is when the wait began. It is the scheduler's task clock,
+// which can run slightly behind CLOCK_MONOTONIC, so the age is an estimate.
+std::optional<__u64> last_ran_ns(__u32 tid) {
+    std::ifstream input("/proc/" + std::to_string(tid) + "/sched");
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!line.starts_with("se.exec_start")) continue;
+        const auto colon = line.find(':');
+        if (colon == std::string::npos) return std::nullopt;
+        try {
+            const double milliseconds = std::stod(line.substr(colon + 1));
+            if (milliseconds <= 0) return std::nullopt;
+            return static_cast<__u64>(milliseconds * 1e6);
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
+// FUSE connections (superblock dev_t) with requests waiting, from fusectl.
+std::vector<__u32> fuse_connections_waiting() {
+    std::vector<__u32> busy;
+    std::error_code error;
+    for (const auto& entry :
+         std::filesystem::directory_iterator("/sys/fs/fuse/connections", error)) {
+        std::ifstream input(entry.path() / "waiting");
+        unsigned long waiting{};
+        if (!(input >> waiting) || waiting == 0) continue;
+        try {
+            busy.push_back(static_cast<__u32>(std::stoul(entry.path().filename().string())));
+        } catch (const std::exception&) {
+        }
+    }
+    return busy;
 }
 
 const char* tcp_state(__u32 state) {
@@ -634,7 +739,8 @@ class Emitter {
     void fuse() {
         const int fd = bpf_map__fd(skeleton_->maps.fuse_statistics);
         const auto mounts = fuse_mounts();
-        auto mount_of = [&](__u32 dev) {
+        auto mount_of = [&](__u32 dev) -> std::string {
+            if (dev == 0) return "unknown";
             const auto found = mounts.find(dev);
             return found == mounts.end()
                 ? std::to_string(dev >> 20) + ":" + std::to_string(dev & 0xfffff)
@@ -644,21 +750,42 @@ class Emitter {
         struct Outstanding {
             std::size_t count{};
             double oldest_ms{};
+            bool before_start{};  // includes a request sent before the helper attached
         };
         std::map<std::pair<__u32, __u32>, Outstanding> outstanding;
         const int starts_fd = bpf_map__fd(skeleton_->maps.fuse_starts);
+        std::set<__u32> probed;
         const __u64 now = monotonic_ns();
         for (const auto& [tid, start] : dump<__u32, fuse_start>(starts_fd)) {
             if (!thread_exists(tid)) {
                 bpf_map_delete_elem(starts_fd, &tid);
                 continue;
             }
+            probed.insert(tid);
             auto& entry = outstanding[{start.dev, start.opcode}];
             ++entry.count;
             if (now > start.start_ns) {
                 entry.oldest_ms = std::max(entry.oldest_ms,
                                            static_cast<double>(now - start.start_ns) / 1e6);
             }
+        }
+        if (!early_scanned_) {
+            early_scanned_ = true;
+            scan_early_fuse_waits(probed, mounts, now);
+        }
+        for (auto early = early_waits_.begin(); early != early_waits_.end();) {
+            if (!waiting_on_fuse(kernel_stack(early->first))) {
+                early = early_waits_.erase(early);  // answered (or the thread exited)
+                continue;
+            }
+            auto& entry = outstanding[{early->second.dev, early->second.opcode}];
+            ++entry.count;
+            entry.before_start = true;
+            if (now > early->second.start_ns) {
+                entry.oldest_ms = std::max(entry.oldest_ms,
+                                           static_cast<double>(now - early->second.start_ns) / 1e6);
+            }
+            ++early;
         }
         const auto entries = dump<fuse_key, fuse_stats>(fd);
         std::set<std::pair<__u32, __u32>> written;
@@ -680,7 +807,10 @@ class Emitter {
                       << hist_json(delta) << ",\"errors\":" << value.errors - previous.errors
                       << ",\"outstanding\":" << (open == outstanding.end() ? 0 : open->second.count)
                       << ",\"oldest_outstanding_ms\":"
-                      << number(open == outstanding.end() ? 0 : open->second.oldest_ms) << "}\n";
+                      << number(open == outstanding.end() ? 0 : open->second.oldest_ms)
+                      << ",\"outstanding_before_start\":"
+                      << (open != outstanding.end() && open->second.before_start ? "true" : "false")
+                      << "}\n";
         }
         for (const auto& [identity, open] : outstanding) {
             if (written.contains(identity)) continue;
@@ -689,15 +819,50 @@ class Emitter {
                       << escape(mount_of(identity.first)) << "\",\"opcode\":\""
                       << fuse_opcode(identity.second) << "\"," << hist_json(gw_hist{})
                       << ",\"errors\":0,\"outstanding\":" << open.count
-                      << ",\"oldest_outstanding_ms\":" << number(open.oldest_ms) << "}\n";
+                      << ",\"oldest_outstanding_ms\":" << number(open.oldest_ms)
+                      << ",\"outstanding_before_start\":" << (open.before_start ? "true" : "false")
+                      << "}\n";
         }
         rotate_if_full<fuse_key>(fd, entries.size(), 1024, fuse_previous_);
+    }
+
+    void scan_early_fuse_waits(const std::set<__u32>& probed,
+                               const std::map<__u32, std::string>& mounts, __u64 now) {
+        // Attribute to a mount only when that is unambiguous: one FUSE
+        // connection with waiting requests, or a single FUSE mount.
+        __u32 dev = 0;
+        if (const auto busy = fuse_connections_waiting(); busy.size() == 1) {
+            dev = busy.front();
+        } else if (mounts.size() == 1) {
+            dev = mounts.begin()->first;
+        }
+        std::error_code error;
+        for (const auto& process : std::filesystem::directory_iterator("/proc", error)) {
+            const auto name = process.path().filename().string();
+            if (name.empty() || name.find_first_not_of("0123456789") != std::string::npos) continue;
+            std::error_code task_error;
+            for (const auto& task :
+                 std::filesystem::directory_iterator(process.path() / "task", task_error)) {
+                __u32 tid{};
+                try {
+                    tid = static_cast<__u32>(std::stoul(task.path().filename().string()));
+                } catch (const std::exception&) {
+                    continue;
+                }
+                if (probed.contains(tid)) continue;
+                const auto frames = kernel_stack(tid);
+                if (!waiting_on_fuse(frames)) continue;
+                const auto ran = last_ran_ns(tid);
+                early_waits_[tid] = {.dev = dev,
+                                     .opcode = fuse_opcode_from_stack(frames),
+                                     .start_ns = ran && *ran < now ? *ran : now};
+            }
+        }
     }
 
     void block() {
         const int fd = bpf_map__fd(skeleton_->maps.statistics);
         const auto entries = dump<io_key, io_stats>(fd);
-        static const char* operations[] = {"read", "write", "flush", "discard"};
         for (const auto& [key, value] : entries) {
             const auto bytes = key_bytes(key);
             io_stats previous{};
@@ -711,7 +876,7 @@ class Emitter {
             if (service.count == 0 && queue.count == 0 && errors == 0) continue;
             std::cout << prefix("block") << ",\"device\":\"" << escape(block_device(key.dev))
                       << "\",\"operation\":\""
-                      << (key.operation < 4 ? operations[key.operation] : "other")
+                      << block_operation(key.operation)
                       << "\",\"bytes\":" << value.bytes - previous.bytes << ",\"errors\":" << errors
                       << ",\"direct_issue\":" << value.direct_issue - previous.direct_issue
                       << ",\"service\":{" << hist_json(service) << "},\"queue\":{"
@@ -883,6 +1048,14 @@ class Emitter {
     std::string timestamp_;
     double elapsed_{};
     std::map<std::string, std::string> fuse_previous_;
+    // FUSE requests already waiting when the helper attached (see kernel_stack).
+    struct EarlyWait {
+        __u32 dev{};     // 0 when the mount cannot be determined
+        __u32 opcode{};  // 0 (UNKNOWN) when the stack does not show the caller
+        __u64 start_ns{};
+    };
+    bool early_scanned_{};
+    std::map<__u32, EarlyWait> early_waits_;
     std::map<std::string, std::string> block_previous_;
     std::map<std::string, std::string> offcpu_previous_;
     std::map<std::string, std::string> runqueue_previous_;

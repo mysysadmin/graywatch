@@ -53,9 +53,9 @@ void usage() {
                  "  graywatchctl tasks (-p PID | -u USER) "
                  "[--interval SECONDS] [--count SAMPLES] [--top THREADS] "
                  "[--json] [--log PATH]\n"
-                 "  graywatchctl status [--socket PATH] [--resource cpu|io|memory|network]\n"
+                 "  graywatchctl status [--socket PATH] [--resource cpu|io|memory|network|fuse]\n"
                  "  graywatchctl subscribe [--socket PATH] "
-                 "[--resource cpu|io|memory|network|all] "
+                 "[--resource cpu|io|memory|network|fuse|all] "
                  "[--min-severity 0..1] [--count EVENTS]\n"
                  "  graywatchctl cluster HOST... [--user USER] [--timeout SECONDS] "
                  "[--remote-command PATH] [--socket PATH] [--json]\n";
@@ -181,9 +181,10 @@ DaemonOptions parse_daemon_options(int argc, char** argv, bool subscribe) {
             options.resource = argv[++index];
             if (options.resource != "cpu" && options.resource != "io" &&
                 options.resource != "network" && options.resource != "memory" &&
+                options.resource != "fuse" &&
                 (!subscribe || options.resource != "all")) {
                 throw std::invalid_argument(
-                    "--resource must be cpu, io, memory, network, or all");
+                    "--resource must be cpu, io, memory, network, fuse, or all");
             }
         } else if (subscribe && argument == "--min-severity" &&
                    index + 1 < argc) {

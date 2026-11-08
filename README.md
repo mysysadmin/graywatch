@@ -248,15 +248,28 @@ The report contains:
   stacking layer;
 - D-state threads grouped by command and wait channel, how long they stayed
   blocked, and what the channel implicates (FUSE, NFS, block, filesystem
-  journal, locks, reclaim);
+  journal, locks, reclaim). Snapshots alone cannot tell one long wait from
+  many short ones; when the eBPF `offcpu` collector ran, the report uses its
+  per-process measurements, and a process whose longest wait was short is
+  reported as busy rather than stuck (info, not critical);
+- FUSE mounts the daemon saw `stalled`, and requests the eBPF helper saw
+  waiting without an answer. An unanswered FUSE request is ranked first and
+  leads the assessment, because disk, memory and network findings in the
+  same window are then usually its context, not its cause;
 - per-device latency percentiles, memory reclaim/swap/OOM totals, TCP
-  retransmissions, and InfiniBand port state;
+  retransmissions, and InfiniBand port state. Block errors on pass-through
+  commands (`drv_in`/`drv_out`, typically SMART queries) are info, errors on
+  unnamed operations a warning, and read/write/flush errors critical. Network
+  errors (TCP input errors, InfiniBand receive errors, link down) are called a
+  likely contributor; congestion and retransmits alone are reported as
+  context, since heavy transfers cause them;
 - a timeline of the degraded episodes;
 - kernel log matches (I/O errors, NVMe timeouts, hung tasks, OOM, lockups, link
   flaps, filesystem and hardware errors). Matches from more than 15 minutes
   before the window are reported as history rather than as findings; and
 - eBPF findings when `bpf-events.jsonl` is present: FUSE requests still
-  waiting for the daemon (critical at 5 s), slow FUSE opcodes, block devices
+  waiting for the daemon (critical at 5 s, marked when they were already
+  waiting before the collection started), slow FUSE opcodes, block devices
   whose time is spent queued rather than in the device, tasks still in `D`
   state with their kernel stack, cgroups with run-queue p99 of 10 ms or more,
   the connections that retransmitted, and the processes and cgroups that
@@ -264,7 +277,8 @@ The report contains:
 - collection coverage: root or not, PSI status with how to enable it,
   `hidepid`, sampling gaps, and daemon errors.
 
-The thresholds in the report are triage heuristics. The daemon's per-interval
+Text and Markdown output wrap at 80 columns. The thresholds in the report are
+triage heuristics. The daemon's per-interval
 `condition` remains the authoritative classification.
 
 The x86-64 artifact was validated unchanged on Rocky Linux 9, Debian 13, and
@@ -433,13 +447,14 @@ Unix-domain socket:
 ./build/graywatchctl status --socket /tmp/graywatchd.sock --resource io
 ./build/graywatchctl status --socket /tmp/graywatchd.sock --resource memory
 ./build/graywatchctl status --socket /tmp/graywatchd.sock --resource network
+./build/graywatchctl status --socket /tmp/graywatchd.sock --resource fuse
 ./build/graywatchctl subscribe --socket /tmp/graywatchd.sock \
   --resource io --min-severity 0.10
 ```
 
-CPU and memory `status` return one current schema-v1 JSON event; I/O and
-network status return JSON arrays because a machine can have several devices or
-interfaces.
+CPU and memory `status` return one current schema-v1 JSON event; I/O, network
+and FUSE status return JSON arrays because a machine can have several devices,
+interfaces or mounts.
 
 `status` describes only the **most recent interval**, by default the last
 second, not the time since the daemon started. The daemon samples every
@@ -453,8 +468,8 @@ happens) or the support collector, which records every interval to
 `events.jsonl` and summarizes the window in `report.txt`.
 `subscribe` remains connected and prints future events matching both the
 resource and minimum severity. Use `--resource all` (the default) for every
-resource and add `--count N` for a bounded subscription. The protocol supports `GET` (CPU), `GET io`, `GET memory`, `GET network`
-and `SUBSCRIBE <minimum-severity> [cpu|io|memory|network|all]` as
+resource and add `--count N` for a bounded subscription. The protocol supports `GET` (CPU), `GET io`, `GET memory`, `GET network`,
+`GET fuse` and `SUBSCRIBE <minimum-severity> [cpu|io|memory|network|fuse|all]` as
 newline-delimited commands. Omitting the protocol resource retains the original `all` behavior.
 The daemon refuses to replace an existing socket path, preventing it from
 unlinking another live service accidentally.
@@ -529,6 +544,39 @@ stalls, file refaults, OOM kills, and the PSI values. PSI availability is
 evaluated every interval, so an interval with a failed PSI read reports
 `psi_available: false` instead of zero stall time.
 
+`status --resource fuse` returns one event per FUSE connection (`fuse`,
+`fuseblk` and `fuse.*` mounts; bind mounts of the same connection appear
+once). The daemon reads the kernel's count of requests waiting for the FUSE
+daemon from `/sys/fs/fuse/connections/<id>/waiting`, where `<id>` is the
+mount's device number (`0:49` is connection 49). Conditions:
+
+- `idle`: no requests waiting;
+- `active` (severity 0.01): requests waiting, and the count changes. A busy
+  mount is normally `active`;
+- `stalled` (severity 0.8, `no_progress`): the same non-zero count for 30 s
+  or more. The daemon is not answering; `unchanged_seconds` says for how long;
+- `unavailable`: the count could not be read. `assessment_reason` is
+  `permission_denied` or `fusectl_missing`.
+
+The count covers all requests, including background readahead and writeback,
+but it says neither which request nor which process waits; the eBPF `fuse`
+collector does. The control files are readable by root only, so the
+unprivileged service reports `unavailable` until it is given
+`CAP_DAC_READ_SEARCH`, which bypasses read permission checks and grants
+nothing else. The optional drop-in `packaging/graywatchd-fuse.conf`
+(installed to the documentation directory) does that:
+
+```sh
+sudo install -D -m 0644 /usr/share/doc/graywatch/graywatchd-fuse.conf \
+  /etc/systemd/system/graywatchd.service.d/fuse.conf
+sudo systemctl daemon-reload && sudo systemctl restart graywatchd
+```
+
+It was validated with the unit's full hardening on the playground: without the
+capability `/quobyte` was `unavailable`, with it the daemon saw the waiting
+request. The support collector runs its daemon as root, so archives include
+FUSE events without the drop-in.
+
 ## eBPF helper (graywatch-bpf)
 
 `graywatch-bpf` is an optional, root-only helper that adds kernel evidence
@@ -559,7 +607,7 @@ and p50/p99 upper bounds. The collectors:
 | Collector | Hooks | Key | What it answers |
 | --- | --- | --- | --- |
 | `fuse` | fentry/fexit `fuse_simple_request` (5.14) or `__fuse_simple_request` (6.x+) | mount, opcode | How long the FUSE daemon took to answer each kind of request, which requests are still waiting and for how long, and error replies (ENOENT, ENODATA, ERANGE, ENOSYS and EOPNOTSUPP are not errors). |
-| `block` | `block_rq_insert`, `blk_mq_start_request`, `block_rq_complete` | device, operation | Queue time (insert to dispatch, i.e. scheduler and tag waits) versus device time (dispatch to completion), bytes, errors. |
+| `block` | `block_rq_insert`, `blk_mq_start_request`, `block_rq_complete` | device, operation | Queue time (insert to dispatch, i.e. scheduler and tag waits) versus device time (dispatch to completion), bytes, errors. Operations are named `read`, `write`, `flush`, `discard`, `secure_erase`, `write_zeroes`, and `drv_in`/`drv_out` for pass-through commands such as SMART queries from `smartctl` or `smartd`; anything else is `opN`. |
 | `offcpu` | `sched_switch`, `sched_wakeup` | process, kernel stack | How long tasks slept in `D` state and in which kernel path, plus tasks still blocked longer than `--blocked-report-ms` (default 1000). |
 | `runqueue` | `sched_wakeup`, `sched_wakeup_new`, `sched_switch` | cgroup v2 path | Wakeup-to-run latency per cgroup, i.e. which service is starved for CPU. |
 | `tcp_retransmit` | `tcp_retransmit_skb` | connection | Which peers and ports retransmit, and the socket state. |
@@ -572,6 +620,15 @@ Example FUSE interval with a request still outstanding:
  "opcode":"LOOKUP","count":2,"average_ms":300.124,"max_ms":300.126,
  "p99_upper_us":524288,"errors":0,"outstanding":1,"oldest_outstanding_ms":158.949}
 ```
+
+A request that was already waiting when the helper started is invisible to
+the fentry probe. At startup the helper therefore scans `/proc/*/task/*/stack`
+for threads in `request_wait_answer`, infers the opcode from the calling
+function (for example `fuse_create_open` is CREATE), and estimates when the
+wait began from the thread's last scheduling time
+(`/proc/<tid>/sched`). Such requests carry `"outstanding_before_start":true`.
+The mount is known only when it is unambiguous (one FUSE mount, or one
+connection with waiting requests); otherwise it is `unknown`.
 
 Boundaries:
 
@@ -767,11 +824,14 @@ SSH runs with `BatchMode=yes`, so key-based access is required.
 `--remote-command` names the `graywatchctl` on the remote host (default
 `/usr/bin/graywatchctl`). The snapshot summarizes the CPU condition and PSI
 availability, waiting-thread counts, the thread with the largest absolute
-scheduler wait, memory condition, one block device, and current
+scheduler wait, memory condition, one block device, FUSE state, and current
 TCP/InfiniBand issues. Never-used `inactive` ports are not listed as issues.
 The DEVICE column shows the most severe `congested`, `saturated` or `degraded`
 device with its condition. With none, it shows the busiest healthy device at
-1% busy or more, otherwise `-`. Add `--json` when
+1% busy or more, otherwise `-`. The FUSE column shows `STALLED <mount> <s>s`
+for a stalled mount (with `+N` for more), else `active w=N` (N requests
+waiting), `idle`, `no-access` when the daemon cannot read fusectl, or `-`
+when it predates the FUSE resource. Add `--json` when
 the snapshot should be attached to a support case or processed by another tool.
 
 Example output from the idle playground:

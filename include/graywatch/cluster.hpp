@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 namespace graywatch {
 
 namespace json {
@@ -20,5 +22,11 @@ inline constexpr double cluster_minimum_busy_percent = 1.0;
 // busiest healthy device at or above cluster_minimum_busy_percent; otherwise
 // none (nullptr).
 const json::Value* notable_device(const json::Value& io);
+
+// The FUSE column from a `status --resource fuse` array: "STALLED <mount> <s>"
+// for the longest-stalled mount (+N more), "active w=N" with requests in
+// flight, "idle", "no-access" when the daemon cannot read fusectl (it runs
+// unprivileged), or "-" without FUSE mounts or an older daemon.
+std::string fuse_summary(const json::Value& fuse);
 
 }  // namespace graywatch

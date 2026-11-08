@@ -8,6 +8,9 @@
 
 namespace graywatch::report {
 
+// Text and Markdown reports wrap at this many columns.
+inline constexpr std::size_t report_width = 80;
+
 // Archive member base name -> contents.
 using Files = std::map<std::string, std::string>;
 

@@ -17,8 +17,8 @@ the kernel log or the eBPF helper:
 Root is optional, but it improves visibility into threads owned by other users,
 allows reading the kernel log, and is required for the eBPF helper. The archive
 contains system metadata (including the kernel command line and PSI status),
-block-device topology, mounts, initial/final CPU, I/O, memory and network
-state, raw interval JSON events, eBPF evidence (bpf-events.jsonl), the last
+block-device topology, mounts, initial/final CPU, I/O, memory, network and
+FUSE state, raw interval JSON events, eBPF evidence (bpf-events.jsonl), the last
 5000 kernel log lines, daemon diagnostics, and report.txt. Review it before
 sharing.
 

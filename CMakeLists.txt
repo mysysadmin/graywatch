@@ -14,6 +14,7 @@ add_library(graywatch_core
     src/cluster.cpp
     src/detector.cpp
     src/event.cpp
+    src/fuse_stats.cpp
     src/io_health.cpp
     src/json.cpp
     src/memory_stats.cpp
@@ -72,7 +73,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/graywatchd.service"
     DESTINATION "${GRAYWATCH_SYSTEMD_UNIT_DIR}")
 install(FILES packaging/graywatch.conf
     DESTINATION "${GRAYWATCH_SYSUSERS_DIR}")
-install(FILES README.md LICENSE
+install(FILES README.md LICENSE packaging/graywatchd-fuse.conf
     DESTINATION "${CMAKE_INSTALL_DOCDIR}")
 
 include(CTest)
@@ -116,6 +117,11 @@ if(BUILD_TESTING)
     target_link_libraries(memory_stats_test PRIVATE graywatch_core)
     target_compile_options(memory_stats_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME memory_stats COMMAND memory_stats_test)
+
+    add_executable(fuse_stats_test tests/fuse_stats_test.cpp)
+    target_link_libraries(fuse_stats_test PRIVATE graywatch_core)
+    target_compile_options(fuse_stats_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME fuse_stats COMMAND fuse_stats_test)
 
     add_executable(cluster_test tests/cluster_test.cpp)
     target_link_libraries(cluster_test PRIVATE graywatch_core)

@@ -162,7 +162,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 snapshot() {
-    for resource in cpu io memory network; do
+    for resource in cpu io memory network fuse; do
         "$client" status --socket "$socket" --resource "$resource" \
             > "$work/$resource-$1.json" 2>> "$work/collection-errors.txt" ||
             note_error "status $resource $1 failed"

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <iostream>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 
 namespace {
@@ -239,6 +240,113 @@ void test_bpf() {
             "eBPF FUSE slowness drives conclusion");
 }
 
+// Text and Markdown fit in 80 columns; only a single over-long word (a path)
+// may exceed it, alone on its line.
+void require_width(const Report& report) {
+    using graywatch::report::Format;
+    for (const auto format : {Format::text, Format::markdown}) {
+        std::istringstream lines(graywatch::report::render(report, format));
+        std::string line;
+        while (std::getline(lines, line)) {
+            if (line.size() <= graywatch::report::report_width) continue;
+            const auto start = line.find_first_not_of(" *-");
+            require(start != std::string::npos &&
+                        line.find(' ', start) == std::string::npos,
+                    "line wider than 80 columns: " + line);
+        }
+    }
+}
+
+// The fio-on-Quobyte incident: a CREATE never answered while disks were busy,
+// InfiniBand congested, a disk-health tool's pass-through commands failed and
+// a storage thread kept re-blocking on short reads.
+void test_incident_triage() {
+    auto files = bundle(true);  // dm-0 degraded: a critical disk finding exists
+    std::string events = files["events.jsonl"];
+    for (int second = 1; second <= 40; ++second) {
+        events += R"({"resource":"network","timestamp":")" + ts(second) +
+                  R"(","condition":"congested","severity":0.5,"interface":{"kind":"infiniband",)"
+                  R"("device":"mlx4_0","port":1},"evidence":{"state":"ACTIVE","rate":"56 Gb/sec",)"
+                  R"("transmit_wait":2000}})" "\n";
+    }
+    files["events.jsonl"] = events;
+    files["bpf-events.jsonl"] =
+        R"({"schema_version":1,"event_type":"bpf_status","collectors":[{"name":"fuse","enabled":true},)"
+        R"({"name":"block","enabled":true},{"name":"offcpu","enabled":true}]})" "\n"
+        R"({"event_type":"bpf_interval","collector":"fuse","timestamp":"2026-11-07T21:00:40.000Z",)"
+        R"("mount":"/quobyte","opcode":"CREATE","count":0,"total_ms":0,"max_ms":0,"histogram_us":{},)"
+        R"("errors":0,"outstanding":1,"oldest_outstanding_ms":482400,"outstanding_before_start":true})" "\n"
+        R"({"event_type":"bpf_interval","collector":"block","timestamp":"2026-11-07T21:00:20.000Z",)"
+        R"("device":"sda","operation":"drv_in","errors":6,"direct_issue":6,)"
+        R"("service":{"count":6,"total_ms":2,"max_ms":0.8,"histogram_us":{"1024":6}},)"
+        R"("queue":{"count":0,"total_ms":0,"max_ms":0,"histogram_us":{}}})" "\n"
+        R"({"event_type":"bpf_interval","collector":"block","timestamp":"2026-11-07T21:00:21.000Z",)"
+        R"("device":"sdb","operation":"other","errors":2,"direct_issue":2,)"
+        R"("service":{"count":2,"total_ms":1,"max_ms":0.8,"histogram_us":{"1024":2}},)"
+        R"("queue":{"count":0,"total_ms":0,"max_ms":0,"histogram_us":{}}})" "\n"
+        R"({"event_type":"bpf_interval","collector":"offcpu","outstanding":false,"pid":4242,)"
+        R"("command":"app","count":50000,"total_ms":90000,"max_ms":12,"stack":["io_schedule"]})" "\n";
+    const auto report = graywatch::report::analyze(files);
+
+    // 1. Pass-through failures are not disk errors.
+    const auto* passthrough = find(report, "Pass-through commands to sda failed 6 times");
+    require(passthrough && passthrough->severity == Severity::info, "pass-through errors are info");
+    require(find(report, "Block device sda returned") == nullptr, "no critical sda error");
+    const auto* unclassified = find(report, "errors on other requests");
+    require(unclassified && unclassified->severity == Severity::warning,
+            "unclassified request errors are a warning");
+
+    // 2. Continuous short waits are busy, not stuck.
+    const auto* blocked = find(report, "Threads in uninterruptible sleep");
+    require(blocked && blocked->severity == Severity::info &&
+                any_contains(blocked->details, "busy rather than stuck") &&
+                any_contains(blocked->details, "the longest 12 ms"),
+            "eBPF qualifies D-state snapshots");
+
+    // 3. The unanswered request leads; load-only network evidence is context.
+    require(!report.findings.empty() &&
+                report.findings.front().title == "FUSE requests stuck without an answer",
+            "hung request is the first finding");
+    require(any_contains(report.findings.front().details, "already waiting when the collection"),
+            "pre-existing request flagged");
+    require(!report.conclusions.empty() &&
+                report.conclusions.front().starts_with(
+                    "A FUSE CREATE request on /quobyte waited 482 s"),
+            "assessment leads with the stuck request");
+    require(any_contains(report.conclusions, "common during heavy transfers"),
+            "congestion is context");
+    require(!any_contains(report.conclusions, "likely contributor"),
+            "congestion alone is not called a likely cause");
+    require_width(report);
+}
+
+// The daemon's fusectl view: a mount whose waiting count stays frozen.
+void test_daemon_fuse() {
+    auto files = bundle(false);
+    std::string events = files["events.jsonl"];
+    for (int second = 1; second <= 40; ++second) {
+        const bool stalled = second >= 31;
+        events += R"({"resource":"fuse","timestamp":")" + ts(second) + R"(","condition":")" +
+                  (stalled ? "stalled" : "active") + R"(","severity":)" + (stalled ? "0.8" : "0.01") +
+                  R"(,"mount":{"path":"/quobyte","filesystem":"fuse.quobyte","device":"0:49",)"
+                  R"("connection":49},"evidence":{"waiting_requests":1,"unchanged_seconds":)" +
+                  std::to_string(second - 1) + "}}\n";
+        events += R"({"resource":"fuse","timestamp":")" + ts(second) +
+                  R"(","condition":"unavailable","severity":0,"mount":{"path":"/mnt/other"},)"
+                  R"("evidence":{"waiting_requests":0}})" "\n";
+    }
+    files["events.jsonl"] = events;
+    const auto report = graywatch::report::analyze(files);
+    const auto* stalled = find(report, "FUSE mount /quobyte made no progress");
+    require(stalled && stalled->severity == Severity::critical &&
+                any_contains(stalled->details, "no change for 39 s"),
+            "daemon FUSE stall reported");
+    require(any_contains(report.conclusions, "The FUSE mount /quobyte answered nothing for 39 s"),
+            "daemon FUSE stall leads the assessment");
+    require(any_contains(report.coverage, "/mnt/other: the daemon could not read"),
+            "unreadable fusectl noted");
+}
+
 void test_render() {
     const auto report = graywatch::report::analyze(bundle());
     using graywatch::report::Format;
@@ -251,6 +359,8 @@ void test_render() {
     const auto json = graywatch::json::parse(graywatch::report::render(report, Format::json));
     require(json["findings"].array().size() == report.findings.size(), "json findings");
     require(json["system"].string("hostname") == "nodea", "json system");
+
+    require_width(report);
 }
 
 }  // namespace
@@ -263,6 +373,8 @@ int main() {
         test_ports_and_conclusions();
         test_kernel_log();
         test_bpf();
+        test_incident_triage();
+        test_daemon_fuse();
         test_render();
     } catch (const std::exception& error) {
         std::cerr << "report_test: " << error.what() << '\n';

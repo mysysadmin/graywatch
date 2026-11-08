@@ -375,12 +375,22 @@ class Analysis {
         check_memory();
         check_io();
         check_network();
+        check_fuse();
         check_bpf();
         check_kernel_log();
         correlate();
+        // Within a severity, hung requests (nothing is answering) come before
+        // degraded performance (things are slow but still moving).
+        const auto hung = [](const Finding& finding) {
+            return finding.area == "fuse" && (finding.title.find("stuck") != std::string::npos ||
+                                              finding.title.find("no progress") != std::string::npos);
+        };
         std::stable_sort(report_.findings.begin(), report_.findings.end(),
-                         [](const Finding& a, const Finding& b) {
-                             return static_cast<int>(a.severity) < static_cast<int>(b.severity);
+                         [&](const Finding& a, const Finding& b) {
+                             if (a.severity != b.severity) {
+                                 return static_cast<int>(a.severity) < static_cast<int>(b.severity);
+                             }
+                             return hung(a) && !hung(b);
                          });
         std::stable_sort(report_.timeline.begin(), report_.timeline.end(),
                          [](const auto& a, const auto& b) { return a.start < b.start; });
@@ -392,6 +402,15 @@ class Analysis {
         static const std::string empty;
         const auto found = files_.find(name);
         return found == files_.end() ? empty : found->second;
+    }
+
+    // Whether the eBPF helper ran the named collector during this collection.
+    bool bpf_enabled(std::string_view name) const {
+        if (!bpf_status_) return false;
+        for (const auto& collector : (*bpf_status_)["collectors"].array()) {
+            if (collector.string("name") == name) return collector.boolean("enabled", false);
+        }
+        return false;
     }
 
     void add(Severity severity, std::string area, std::string title,
@@ -634,6 +653,28 @@ class Analysis {
             longest[identity.second] = std::max(longest[identity.second], best);
         }
 
+        // /proc snapshots only show that a thread was in D at that instant, so a
+        // thread doing continuous short I/O looks the same as one stuck for the
+        // whole time. The eBPF off-CPU collector measures every wait. It groups
+        // waits per process and kernel stack (the thread name is the first one
+        // seen), so the comparison is per process: if no wait in the process
+        // lasted long, none of its threads was stuck.
+        struct Measured {
+            double count{};
+            double longest_ms{};
+        };
+        std::map<long, Measured> measured;
+        const bool offcpu = bpf_enabled("offcpu");
+        for (const auto* sample : bpf_by_collector_["offcpu"]) {
+            auto& entry = measured[static_cast<long>(sample->number("pid", 0.0))];
+            if (sample->boolean("outstanding", false)) {
+                entry.longest_ms = std::max(entry.longest_ms, sample->number("blocked_ms", 0.0));
+            } else {
+                entry.count += sample->number("count", 0.0);
+                entry.longest_ms = std::max(entry.longest_ms, sample->number("max_ms", 0.0));
+            }
+        }
+
         if (!blocked.empty()) {
             std::vector<std::pair<Key, Blocked>> ordered(blocked.begin(), blocked.end());
             std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
@@ -645,14 +686,39 @@ class Analysis {
                 const auto& [key, entry] = ordered[index];
                 const auto [category, meaning] = classify_wait_channel(key.second);
                 blocked_categories_[category] += entry.snapshots;
-                const double stuck = static_cast<double>(longest[key]) * interval;
+                const double consecutive = static_cast<double>(longest[key]) * interval;
+                Measured seen;
+                bool found = false;
+                for (const long pid : entry.pids) {
+                    if (const auto it = measured.find(pid); it != measured.end()) {
+                        found = true;
+                        seen.count += it->second.count;
+                        seen.longest_ms = std::max(seen.longest_ms, it->second.longest_ms);
+                    }
+                }
+                double stuck = consecutive;
+                std::string duration;
+                if (offcpu && found) {
+                    stuck = seen.longest_ms / 1000.0;
+                    duration = seen.longest_ms < 1000.0
+                        ? format("busy rather than stuck: eBPF measured %.0f separate waits in "
+                                 "this process, the longest %.0f ms", seen.count, seen.longest_ms)
+                        : format("the longest single wait in this process was %.1f s (eBPF)",
+                                 seen.longest_ms / 1000.0);
+                } else if (longest[key] > 1) {
+                    duration = format("in D in %zu consecutive snapshots (%.0f s; without eBPF "
+                                      "data this may be one long wait or many short ones)",
+                                      longest[key], consecutive);
+                } else {
+                    duration = "never in D in two consecutive snapshots";
+                }
                 worst_stuck = std::max(worst_stuck, stuck);
                 details.push_back(format(
-                    "%s (%s) in D state on '%s' in %zu of %zu snapshots between %s and %s; one "
-                    "thread stayed blocked for at least %.0fs. Meaning: %s.",
+                    "%s (%s) in D state on '%s' in %zu of %zu snapshots between %s and %s; %s. "
+                    "Meaning: %s.",
                     key.first.c_str(), plural(entry.pids.size(), "process").c_str(),
                     key.second.empty() ? "?" : key.second.c_str(), entry.snapshots, fresh.size(),
-                    clock_of(entry.first).c_str(), clock_of(entry.last).c_str(), stuck,
+                    clock_of(entry.first).c_str(), clock_of(entry.last).c_str(), duration.c_str(),
                     meaning.c_str()));
                 if (index < 5) {
                     timeline(entry.first, "tasks",
@@ -959,7 +1025,9 @@ class Analysis {
                          run.peak->number("severity", 0.0));
             }
             if (bad > 0 || errors > 0) {
-                tcp_bad_ = true;
+                // Input errors are faults; retransmissions alone are usually load.
+                if (errors > 0) network_bad_ = true;
+                else network_load_ = true;
                 add(bad >= 3 || errors > 0 ? Severity::warning : Severity::info, "network",
                     format("TCP retransmissions or errors in %zu of %zu intervals", bad, tcp.size()),
                     {format("%.0f of %.0f segments retransmitted (%.2f%%), %.0f input errors, %.0f "
@@ -1026,7 +1094,7 @@ class Analysis {
                 const std::size_t busy = conditions["congested"];
                 // A handful of wait ticks is normal flow control, not congestion.
                 const bool significant = busy >= 3 && totals["transmit_wait"] >= 1000;
-                network_bad_ |= significant;
+                network_load_ |= significant;
                 add(significant ? Severity::warning : Severity::info, "network",
                     format("InfiniBand port %s congested in %zu intervals", name.c_str(), busy),
                     std::move(details),
@@ -1053,6 +1121,75 @@ class Analysis {
             names.push_back(frame.string());
         }
         return names.empty() ? "(no stack)" : join(names, " < ");
+    }
+
+    // Daemon FUSE events: the per-mount count of requests the FUSE daemon has
+    // not answered, from /sys/fs/fuse/connections. Needs root (or
+    // CAP_DAC_READ_SEARCH); complements the eBPF per-request timing.
+    void check_fuse() {
+        std::map<std::string, std::vector<const Value*>> mounts;
+        for (const auto* event : by_resource_["fuse"]) {
+            mounts[(*event)["mount"].string("path")].push_back(event);
+        }
+        std::vector<std::string> unreadable;
+        for (const auto& [path, events] : mounts) {
+            std::size_t stalled{};
+            std::size_t readable{};
+            double most_waiting{};
+            const Value* longest = nullptr;
+            for (const auto* event : events) {
+                const auto& condition = event->string("condition");
+                if (condition == "unavailable") continue;
+                ++readable;
+                const auto& evidence = (*event)["evidence"];
+                most_waiting = std::max(most_waiting, evidence.number("waiting_requests", 0.0));
+                if (condition == "stalled") {
+                    ++stalled;
+                    if (!longest || evidence.number("unchanged_seconds", 0.0) >
+                                        (*longest)["evidence"].number("unchanged_seconds", 0.0)) {
+                        longest = event;
+                    }
+                }
+            }
+            if (readable == 0) {
+                unreadable.push_back(path);
+                continue;
+            }
+            report_.overview.push_back(format(
+                "FUSE %s (daemon): up to %.0f requests waiting for the FUSE daemon, %zu of %zu "
+                "intervals stalled.", path.c_str(), most_waiting, stalled, readable));
+            if (!longest) continue;
+            for (const auto& run : episodes(events, [](const Value& e) {
+                     return e.string("condition") == "stalled";
+                 })) {
+                timeline(run.start, "fuse", path + " stalled", run.count, 0.8);
+            }
+            const auto& evidence = (*longest)["evidence"];
+            const double seconds = evidence.number("unchanged_seconds", 0.0);
+            fuse_slow_ = true;
+            if (fuse_stuck_.empty()) {
+                fuse_stuck_ = format("The FUSE mount %s answered nothing for %.0f s (%.0f requests "
+                                     "waiting).", path.c_str(), seconds,
+                                     evidence.number("waiting_requests", 0.0));
+            }
+            add(Severity::critical, "fuse", "FUSE mount " + path + " made no progress",
+                {format("%.0f requests were waiting for the FUSE daemon with no change for %.0f s "
+                        "(at %s); %zu of %zu intervals were stalled.",
+                        evidence.number("waiting_requests", 0.0), seconds,
+                        clock_of(longest->string("timestamp")).c_str(), stalled, readable),
+                 "A waiting count frozen for this long means the daemon answered none of them. "
+                 "The eBPF FUSE findings name the operations and their age."},
+                {"Check that the FUSE client daemon is running and responsive (its logs, CPU, "
+                 "threads stuck in `D`) and whether it can reach its storage service.",
+                 "`cat /proc/PID/stack` of a waiting process shows `request_wait_answer` and the "
+                 "operation's caller (e.g. fuse_create_open for CREATE)."});
+        }
+        if (!unreadable.empty()) {
+            report_.coverage.push_back(
+                "FUSE mounts " + join(unreadable, ", ") + ": the daemon could not read "
+                "/sys/fs/fuse/connections (root-only), so stalls are visible only to the eBPF "
+                "helper.");
+        }
     }
 
     void check_bpf() {
@@ -1096,6 +1233,7 @@ class Analysis {
             double errors{};
             double oldest_ms{};
             std::string oldest_at;
+            bool before_start{};
         };
         std::map<std::pair<std::string, std::string>, Op> operations;
         for (const auto* event : bpf_by_collector_["fuse"]) {
@@ -1108,6 +1246,7 @@ class Analysis {
             if (oldest > op.oldest_ms) {
                 op.oldest_ms = oldest;
                 op.oldest_at = event->string("timestamp");
+                op.before_start = event->boolean("outstanding_before_start", false);
             }
         }
         if (operations.empty()) return;
@@ -1129,10 +1268,17 @@ class Analysis {
                 worst_p99 = std::max(worst_p99, std::max(p99, op.histogram.max_ms));
             }
             if (op.oldest_ms >= 5000.0) {
-                stuck.push_back(format("%s %s request outstanding for %.1f s at %s.",
-                                       mount.c_str(), opcode.c_str(), op.oldest_ms / 1000.0,
-                                       clock_of(op.oldest_at).c_str()));
-                worst_stuck = std::max(worst_stuck, op.oldest_ms);
+                stuck.push_back(format(
+                    "%s %s request outstanding for %.1f s at %s%s.", mount.c_str(), opcode.c_str(),
+                    op.oldest_ms / 1000.0, clock_of(op.oldest_at).c_str(),
+                    op.before_start ? " (already waiting when the collection started; age "
+                                      "estimated from the scheduler)"
+                                    : ""));
+                if (op.oldest_ms > worst_stuck) {
+                    worst_stuck = op.oldest_ms;
+                    fuse_stuck_ = format("A FUSE %s request on %s waited %.0f s without an answer.",
+                                         opcode.c_str(), mount.c_str(), op.oldest_ms / 1000.0);
+                }
                 timeline(op.oldest_at, "fuse", mount + " " + opcode + " outstanding", 1, -1.0,
                          "request");
             }
@@ -1188,7 +1334,31 @@ class Analysis {
                 "%.2f / p99 <= %.2f ms over %.0f queued, %.0f errors.", device.c_str(),
                 operation.c_str(), op.service.count, op.service.average_ms(), service_p99,
                 op.queue.average_ms(), queue_p99, op.queue.count, op.errors));
-            if (op.errors > 0) {
+            // drv_in/drv_out are driver pass-through commands (SG_IO, NVMe
+            // admin), e.g. SMART or vendor queries; "other" and opN come from
+            // older helpers or operations without a name.
+            const bool passthrough = operation == "drv_in" || operation == "drv_out";
+            const bool unclassified = operation == "other" || operation.starts_with("op");
+            if (op.errors > 0 && passthrough) {
+                add(Severity::info, "io",
+                    format("Pass-through commands to %s failed %.0f times", device.c_str(),
+                           op.errors),
+                    {format("%.0f %s requests completed with an error. These are driver "
+                            "commands sent by a tool (SMART or vendor queries from smartctl, "
+                            "smartd or a disk-health agent), not reads or writes: no data I/O "
+                            "failed.", op.errors, operation.c_str())},
+                    {"Usually a tool asking for a feature the device does not support. Real I/O "
+                     "errors appear as read/write errors here and in kernel.log."});
+            } else if (op.errors > 0 && unclassified) {
+                add(Severity::warning, "io",
+                    format("Block device %s returned %.0f errors on %s requests", device.c_str(),
+                           op.errors, operation.c_str()),
+                    {"The request type is not one of read, write, flush or discard. With archives "
+                     "from older helpers this includes pass-through commands such as SMART "
+                     "queries, which are not data I/O."},
+                    {"Check kernel.log for I/O errors on this device. If there are none, these "
+                     "are most likely failed pass-through commands."});
+            } else if (op.errors > 0) {
                 add(Severity::critical, "io",
                     format("Block device %s returned %.0f %s errors", device.c_str(), op.errors,
                            operation.c_str()),
@@ -1353,7 +1523,7 @@ class Analysis {
                                        peer_ranked[index].second));
         }
         details.push_back("By peer: " + join(peer_text, ", ") + ".");
-        add(tcp_bad_ || total >= 100 ? Severity::warning : Severity::info, "network",
+        add(network_bad_ || network_load_ || total >= 100 ? Severity::warning : Severity::info, "network",
             format("TCP retransmits on %zu connections", ranked.size()), std::move(details),
             {"Retransmits concentrated on one peer point at that peer or the path to it; spread "
              "across all peers points at this host's NIC, driver or uplink.",
@@ -1494,6 +1664,14 @@ class Analysis {
 
     void correlate() {
         auto& conclusions = report_.conclusions;
+        // An unanswered request is the most direct evidence there is: lead with it.
+        if (!fuse_stuck_.empty()) {
+            conclusions.push_back(
+                fuse_stuck_ + " The FUSE daemon (the storage client) or the service it depends "
+                "on stopped answering: start with that daemon's logs and its connections to its "
+                "storage service. Disk, memory and network findings from the same window are "
+                "context unless they show errors.");
+        }
         const bool fuse = blocked_categories_.contains("fuse") || fuse_slow_;
         const bool nfs = blocked_categories_.contains("nfs");
         if (fuse || nfs) {
@@ -1504,10 +1682,17 @@ class Analysis {
                     "healthy: the delay is above the local block layer, in the " + layer +
                     " client, its storage service or the network path to it.");
             }
-            if (network_bad_ || tcp_bad_) {
-                conclusions.push_back("Network/InfiniBand problems occurred during the same window "
-                                      "as " + layer + " delays; the network path to the storage "
-                                      "service is a likely contributor.");
+            if (network_bad_) {
+                conclusions.push_back("Network/InfiniBand errors (link down, port errors or TCP "
+                                      "input errors) occurred during the same window as " + layer +
+                                      " delays; the network path to the storage service is a "
+                                      "likely contributor.");
+            } else if (network_load_) {
+                conclusions.push_back("InfiniBand congestion or TCP retransmits occurred during "
+                                      "the same window. They are common during heavy transfers; "
+                                      "treat them as a cause only if they persist when the load "
+                                      "drops or concentrate on the storage service's "
+                                      "connections.");
             }
         }
         if (blocked_categories_.contains("block") && !unhealthy_io_.empty()) {
@@ -1547,7 +1732,8 @@ class Analysis {
     std::set<std::string> unhealthy_io_;
     bool psi_cpu_{};
     bool network_bad_{};
-    bool tcp_bad_{};
+    bool network_load_{};      // congestion or retransmits, no errors
+    std::string fuse_stuck_;   // worst unanswered FUSE request, for the assessment
     bool fuse_slow_{};
     double direct_reclaim_{};
     double reclaim_ms_{};
@@ -1655,9 +1841,30 @@ std::string render(const Report& report, Format format_kind) {
             out << text << '\n' << std::string(text.size(), level == 1 ? '=' : '-') << "\n\n";
         }
     };
+    // Write TEXT wrapped at report_width columns: the first line starts with
+    // FIRST, continuation lines with HANG. A word longer than a line (a long
+    // path) gets a line of its own rather than being split.
+    auto wrapped = [&](const std::string& text, const std::string& first,
+                       const std::string& hang) {
+        std::string line = first;
+        bool empty = true;
+        std::istringstream words(text);
+        std::string word;
+        while (words >> word) {
+            if (!empty && line.size() + 1 + word.size() > report_width) {
+                out << line << '\n';
+                line = hang;
+                empty = true;
+            }
+            line += (empty ? "" : " ") + word;
+            empty = false;
+        }
+        out << line << '\n';
+    };
+    auto paragraph = [&](const std::string& text) { wrapped(text, "", ""); };
     auto bullet = [&](const std::string& text, int indent) {
-        out << std::string(static_cast<std::size_t>(indent) * 2, ' ') << (markdown ? "- " : "* ")
-            << text << '\n';
+        const std::string lead(static_cast<std::size_t>(indent) * 2, ' ');
+        wrapped(text, lead + (markdown ? "- " : "* "), lead + "  ");
     };
     auto system = [&](const std::string& key, const char* fallback) {
         const auto found = report.system.find(key);
@@ -1665,10 +1872,11 @@ std::string render(const Report& report, Format format_kind) {
     };
 
     heading("Graywatch support summary: " + system("hostname", "unknown host"), 1);
-    out << "Kernel " << system("kernel_release", "?") << " on "
-        << system("os_PRETTY_NAME", "unknown OS") << ", " << system("cpus", "?")
-        << " CPUs. Collected " << system("collected_utc", "?") << " for "
-        << system("duration_seconds", "?") << "s as uid " << system("uid", "?") << ".\n\n";
+    paragraph("Kernel " + system("kernel_release", "?") + " on " +
+              system("os_PRETTY_NAME", "unknown OS") + ", " + system("cpus", "?") +
+              " CPUs. Collected " + system("collected_utc", "?") + " for " +
+              system("duration_seconds", "?") + "s as uid " + system("uid", "?") + ".");
+    out << '\n';
     std::size_t actionable = 0;
     std::size_t critical = 0;
     for (const auto& finding : report.findings) {
@@ -1678,13 +1886,14 @@ std::string render(const Report& report, Format format_kind) {
     if (actionable > 0) {
         std::string verdict(to_string(report.findings.front().severity));
         std::transform(verdict.begin(), verdict.end(), verdict.begin(), ::toupper);
-        out << "Verdict: " << verdict << ". " << plural(actionable, "finding")
-            << (actionable == 1 ? " needs" : " need") << " attention (" << critical
-            << " critical).\n\n";
+        paragraph("Verdict: " + verdict + ". " + plural(actionable, "finding") +
+                  (actionable == 1 ? " needs" : " need") + " attention (" +
+                  std::to_string(critical) + " critical).");
     } else {
-        out << "Verdict: no degradation detected in this window. If the incident was not "
-               "happening during collection, collect again while it is.\n\n";
+        paragraph("Verdict: no degradation detected in this window. If the incident was not "
+                  "happening during collection, collect again while it is.");
     }
+    out << '\n';
     if (!report.conclusions.empty()) {
         heading("Assessment", 2);
         for (const auto& line : report.conclusions) bullet(line, 0);
@@ -1697,7 +1906,8 @@ std::string render(const Report& report, Format format_kind) {
         std::string level(to_string(finding.severity));
         std::transform(level.begin(), level.end(), level.begin(), ::toupper);
         const std::string title = format("%zu. [%s] ", index + 1, level.c_str()) + finding.title;
-        out << (markdown ? "**" + title + "**" : title) << '\n';
+        if (markdown) wrapped("**" + title + "**", "", "");
+        else wrapped(title, "", std::string(title.find(']') + 2, ' '));
         for (const auto& line : finding.details) bullet(line, 1);
         if (!finding.next_steps.empty()) {
             out << (markdown ? "  Next steps:\n" : "   Next steps:\n");
@@ -1732,8 +1942,9 @@ std::string render(const Report& report, Format format_kind) {
                    std::to_string(report.intervals) + " intervals).", 0);
     }
     for (const auto& line : report.coverage) bullet(line, 0);
-    out << "\nThresholds in this summary are triage heuristics. The daemon's per-interval "
-           "condition in events.jsonl is the authoritative classification.\n";
+    out << '\n';
+    paragraph("Thresholds in this summary are triage heuristics. The daemon's per-interval "
+              "condition in events.jsonl is the authoritative classification.");
     return out.str();
 }
 

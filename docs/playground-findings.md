@@ -145,3 +145,48 @@ Problems found in this real data and fixed before the commit:
 The portable bundle built in the `rocky9` container (`tools/build-in-docker.sh`)
 passed its checksums on nodeb. Its `graywatch-bpf` loaded all six collectors
 there, linking only glibc, libelf, libz and libzstd dynamically.
+
+## fio on Quobyte: an unanswered CREATE
+
+A buffered sequential read on nodea (`fio --rw=read --bs=1m --numjobs=16
+--size=20g --directory=/quobyte/peer-test`; without `--ioengine` fio uses
+psync, so `--iodepth` had no effect) was monitored on all four nodes with the
+support collector (daemon plus all six eBPF collectors) for 11 minutes.
+
+What happened:
+- fio's parent process laid out the 16 files. After about 40 GB, one FUSE
+  CREATE was never answered (from about 00:54:47 UTC). fio and any later
+  access to the directory stayed blocked, and fio never reached its read
+  phase. The request was still waiting after 29 minutes.
+- During the writes nodea's NVMe devices were saturated, congested or
+  degraded (p95 up to 48 ms, queue depth over 1,500), InfiniBand ports showed
+  transmit-wait congestion on all nodes, and TCP retransmitted to the Quobyte
+  services on port 7863. None of these showed errors.
+- From 00:54:52 noded's Quobyte data service read directly from its disks at
+  about 27,000 IOPS, and its threads were often in `D` state on
+  `__iomap_dio_rw`. eBPF measured over 31 million waits, the longest 40 ms:
+  busy, not stuck.
+
+The first reports got the evidence right but the emphasis wrong. Fixed:
+- **FUSE first:** an unanswered FUSE request is now ranked first and leads the
+  assessment; the disk, network and memory findings are its context.
+- **Congestion is not a cause:** InfiniBand congestion and TCP retransmits
+  without errors are now reported as context, not as a likely contributor.
+- **Busy, not stuck:** D-state snapshots of noded's data service had been
+  read as threads blocked for 15 s or more. The report now uses the eBPF
+  off-CPU measurements per process when they exist.
+- **sda "errors":** six errors on sda were `smartd` SMART queries
+  (`REQ_OP_DRV_IN`/`DRV_OUT`) that the disk rejected, not I/O failures. The
+  block collector now names the operations, and the report rates
+  pass-through errors as info.
+- **Requests already waiting:** the CREATE began before the collection, so
+  the fentry probe never saw it start. `graywatch-bpf` now finds such
+  requests by their `request_wait_answer` kernel stack and reported it with
+  `outstanding_before_start` (1,732 s at the time of the check).
+- **FUSE in the daemon:** `graywatchd` gained the `fuse` resource. With
+  root's access to fusectl it reported `/quobyte` `active` with one waiting
+  request and turned `stalled` after 33 s. `cluster` shows it in a FUSE
+  column.
+
+The report also wraps at 80 columns now. Its archives are kept on nodea in
+`/root/gw-fio/`.

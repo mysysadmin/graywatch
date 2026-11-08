@@ -34,6 +34,7 @@ struct Row {
     json::Value io;
     json::Value memory;
     json::Value network;
+    json::Value fuse;
 };
 
 std::string shell_quote(const std::string& text) {
@@ -78,7 +79,7 @@ Row inspect(const Options& options, const std::string& host) {
     std::string status = shell_quote(options.remote_command) + " status";
     if (!options.socket.empty()) status += " --socket " + shell_quote(options.socket);
     std::string remote;
-    for (const char* resource : {"cpu", "io", "memory", "network"}) {
+    for (const char* resource : {"cpu", "io", "memory", "network", "fuse"}) {
         if (!remote.empty()) remote += "; ";
         remote += status + " --resource " + resource + " || echo null";
     }
@@ -98,7 +99,7 @@ Row inspect(const Options& options, const std::string& host) {
     std::istringstream lines(result.output);
     std::string line;
     std::vector<json::Value> values;
-    while (std::getline(lines, line) && values.size() < 4) {
+    while (std::getline(lines, line) && values.size() < 5) {
         if (line.empty()) continue;
         try {
             values.push_back(json::parse(line));
@@ -106,11 +107,12 @@ Row inspect(const Options& options, const std::string& host) {
             values.emplace_back();
         }
     }
-    values.resize(4);
+    values.resize(5);
     row.cpu = values[0];
     row.io = values[1];
     row.memory = values[2];
     row.network = values[3];
+    row.fuse = values[4];
     row.reachable = row.cpu.is_object() && !row.cpu.contains("error");
     if (!row.reachable) row.error = "graywatchd status unavailable on host";
     return row;
@@ -161,7 +163,7 @@ std::string pad(std::string text, std::size_t width, bool right = false) {
 void print_table(const std::vector<Row>& rows) {
     std::cout << pad("HOST", 22) << ' ' << pad("CPU/PSI", 20) << ' ' << pad("WAIT", 6, true)
               << ' ' << pad("TOP THREAD", 26) << ' ' << pad("MEMORY", 22) << ' '
-              << pad("DEVICE", 34) << " NETWORK\n";
+              << pad("DEVICE", 34) << ' ' << pad("FUSE", 24) << " NETWORK\n";
     for (const auto& row : rows) {
         if (!row.reachable) {
             std::cout << pad(row.host, 22) << ' ' << pad("UNREACHABLE", 20) << ' '
@@ -193,7 +195,8 @@ void print_table(const std::vector<Row>& rows) {
         std::cout << pad(row.host, 22) << ' ' << pad(cpu, 20) << ' '
                   << pad(fixed(row.cpu["selection"].number("waiting_threads", 0), 0), 6, true)
                   << ' ' << pad(thread_text, 26) << ' ' << pad(memory, 22) << ' '
-                  << pad(device, 34) << ' ' << compact_network(network_issues(row.network))
+                  << pad(device, 34) << ' ' << pad(fuse_summary(row.fuse), 24) << ' '
+                  << compact_network(network_issues(row.network))
                   << '\n';
     }
 }
@@ -248,6 +251,7 @@ void print_json(const std::vector<Row>& rows) {
         } else {
             std::cout << ",\"cpu\":" << raw(row.cpu) << ",\"io\":" << raw(row.io)
                       << ",\"memory\":" << raw(row.memory) << ",\"network\":" << raw(row.network)
+                      << ",\"fuse\":" << raw(row.fuse)
                       << '}';
         }
         std::cout << (index + 1 < rows.size() ? ",\n" : "\n");
@@ -256,6 +260,35 @@ void print_json(const std::vector<Row>& rows) {
 }
 
 }  // namespace
+
+std::string fuse_summary(const json::Value& fuse) {
+    if (!fuse.is_array() || fuse.array().empty()) return "-";
+    const json::Value* stalled = nullptr;
+    std::size_t stalled_count{};
+    std::size_t readable{};
+    double waiting{};
+    for (const auto& mount : fuse.array()) {
+        const auto& condition = mount.string("condition");
+        if (condition == "unavailable") continue;
+        ++readable;
+        waiting += mount["evidence"].number("waiting_requests", 0);
+        if (condition == "stalled") {
+            ++stalled_count;
+            if (!stalled || mount["evidence"].number("unchanged_seconds", 0) >
+                                (*stalled)["evidence"].number("unchanged_seconds", 0)) {
+                stalled = &mount;
+            }
+        }
+    }
+    if (stalled) {
+        std::string text = "STALLED " + (*stalled)["mount"].string("path") + " " +
+                           fixed((*stalled)["evidence"].number("unchanged_seconds", 0), 0) + "s";
+        if (stalled_count > 1) text += " +" + std::to_string(stalled_count - 1);
+        return text;
+    }
+    if (readable == 0) return "no-access";
+    return waiting > 0 ? "active w=" + fixed(waiting, 0) : "idle";
+}
 
 const json::Value* notable_device(const json::Value& io) {
     const json::Value* problem = nullptr;
