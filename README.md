@@ -224,8 +224,9 @@ submodules in the standard setup keeps the optional collector ready to build.
 ## Portable incident bundle
 
 Build an installation-free bundle on any Linux host with Docker. The build
-runs in a Rocky 9 container, so the eBPF helper works on glibc 2.34 or later
-whatever the host's glibc is, and no toolchain is needed on the host:
+runs in a Rocky 9 container, so the eBPF helper works on RHEL 9 and on any
+distribution with glibc 2.35 or later, whatever the host's glibc is, and no
+toolchain is needed on the host:
 
 ```sh
 tools/build-in-docker.sh            # writes dist/rocky9/
@@ -268,9 +269,14 @@ sudo ./collect-graywatch-support.sh --duration 60 \
 When Clang, `bpftool`, and the libbpf submodule are present, the bundle also
 contains `bin/graywatch-bpf` (force with `GRAYWATCH_PORTABLE_BPF=1`, skip with
 `GRAYWATCH_PORTABLE_BPF=0`). It links libbpf and the C++ runtime statically but
-needs the target's glibc 2.34 or later, `libelf.so.1`, `libz.so.1` and
-`libzstd.so.1` (present on Rocky/RHEL 9, Debian 12 and Ubuntu 22.04 or later),
-because Rocky 9 ships no static libelf. See
+needs the target's glibc, `libelf.so.1`, `libz.so.1` and `libzstd.so.1`, because
+Rocky 9 ships no static libelf. It uses `_dl_find_object`, a glibc 2.35
+function that RHEL 9 backported to its 2.34, so it runs on RHEL 9 and its
+rebuilds and elsewhere on glibc 2.35 or later. Standard installs of Rocky/RHEL
+9, Debian 12 and Ubuntu 22.04 or later have these libraries (on Ubuntu 24.04
+`libelf1t64` is priority important); minimal container images often lack
+libelf. The bundle was run unchanged in an Ubuntu 24.04.5 userland: all six
+collectors loaded and the collection had no errors. See
 [eBPF helper](#ebpf-helper-graywatch-bpf).
 
 Root is optional but recommended (see [What you get](#what-you-get)). It

@@ -58,9 +58,12 @@ bin/graywatch-bpf (present when the bundle was built with the eBPF toolchain)
 records FUSE request latency per opcode and stuck FUSE requests, block queue
 versus device time, uninterruptible sleeps with kernel stacks, per-cgroup
 run-queue latency, per-connection TCP retransmits and direct-reclaim stalls.
-It needs root, kernel BTF (/sys/kernel/btf/vmlinux), glibc 2.34 or later,
-libelf.so.1, libz.so.1 and libzstd.so.1. The collector skips it, with a note
-in collection-errors.txt, when these are missing. Standalone use:
+It needs root, kernel BTF (/sys/kernel/btf/vmlinux), glibc 2.35 or later (or
+the 2.34 of RHEL 9 and its rebuilds), libelf.so.1, libz.so.1 and libzstd.so.1.
+Standard installs of RHEL 9, Debian 12 and Ubuntu 22.04 or later have them;
+minimal container images often lack libelf. The collector continues without
+eBPF, with a note in collection-errors.txt, when these are missing.
+Standalone use:
 
   sudo ./bin/graywatch-bpf --interval 1 --duration 30
 
