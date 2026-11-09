@@ -1,40 +1,58 @@
 GRAYWATCH PORTABLE SUPPORT BUNDLE
 
-This bundle contains Linux binaries that need no installation. It does not
-install files, start a system service, or require a monitoring server.
+Graywatch tells you where a Linux node is losing time: the disks, a FUSE
+storage client, memory, the network or the CPU. Nothing to install, no reboot.
 
-Collect a bounded 60-second support archive while the problem is happening:
+QUICK START
 
-  sudo ./collect-graywatch-support.sh --duration 60
+  1. While the problem is happening, run as root:
 
-Choose the output path, exclude a known-unused InfiniBand port, or leave out
-the kernel log or the eBPF helper:
+       sudo ./collect-graywatch-support.sh
+
+     It collects for 60 seconds and prints the path of the archive it wrote.
+
+  2. Read the report inside the archive, or send the archive to support:
+
+       tar -xOzf graywatch-support-*.tar.gz ./report.txt | less
+
+  The report starts with a verdict and the most likely cause, then lists the
+  findings worst first, each with its evidence and what to check next. If the
+  verdict finds nothing, collect again while the problem is happening.
+
+ROOT AND PSI
+
+  Run as root. Without root the collector cannot use eBPF, and you lose stuck
+  and slow FUSE requests, kernel stacks of blocked threads, which connections
+  retransmit and who stalled in memory reclaim. Root also reads the kernel log.
+
+  PSI (pressure stall information) is optional. It is usually off on RHEL,
+  Rocky and AlmaLinux. Without it the report has no CPU pressure verdict and no
+  memory stall percentages; everything else works. Enabling it needs a reboot:
+
+    grubby --update-kernel=ALL --args=psi=1 && reboot
+
+MORE OPTIONS
+
+Choose the duration and output path, exclude a known-unused InfiniBand port,
+or leave out the kernel log or the eBPF helper:
 
   sudo ./collect-graywatch-support.sh --duration 120 \
     --output /tmp/incident-graywatch.tar.gz \
     --ignore-ib-port mlx5_0/2 --no-kernel-log --no-bpf
 
-Root is optional, but it improves visibility into threads owned by other users,
-allows reading the kernel log, and is required for the eBPF helper. The archive
-contains system metadata (including the kernel command line and PSI status),
-block-device topology, mounts, initial/final CPU, I/O, memory, network and
-FUSE state, raw interval JSON events, eBPF evidence (bpf-events.jsonl), the last
-5000 kernel log lines, daemon diagnostics, and report.txt. Review it before
-sharing.
+The archive contains system metadata (including the kernel command line and
+PSI status), block-device topology, mounts, initial/final CPU, I/O, memory,
+network and FUSE state, raw interval JSON events, eBPF evidence
+(bpf-events.jsonl), the last 5000 kernel log lines, daemon diagnostics, and
+report.txt. Process names, mount points and kernel log lines appear in it.
+Review it before sharing.
 
-report.txt is the support summary: a verdict, ranked findings with evidence
-and next steps, a timeline and collection coverage. Re-create it or produce
-other formats from the archive on any Linux machine:
+Re-create the report or produce other formats from the archive on any Linux
+machine:
 
   ./bin/graywatch-report /tmp/incident-graywatch.tar.gz
   ./bin/graywatch-report /tmp/incident-graywatch.tar.gz --format markdown
   ./bin/graywatch-report /tmp/incident-graywatch.tar.gz --format json
-
-PSI (pressure stall information) adds CPU, memory and I/O stall percentages.
-If /proc/pressure is missing on RHEL-family kernels, PSI is compiled in but
-disabled by default. Enable it with a reboot:
-
-  grubby --update-kernel=ALL --args=psi=1 && reboot
 
 bin/graywatch-bpf (present when the bundle was built with the eBPF toolchain)
 records FUSE request latency per opcode and stuck FUSE requests, block queue

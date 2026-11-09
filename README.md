@@ -1,11 +1,94 @@
 # Graywatch
 
-Graywatch is an experimental local Linux degradation detector. It observes the
-quality of a process's execution environment and exposes versioned,
-evidence-backed health events directly to applications. It runs locally: no
-Prometheus, Grafana, remote collector, or monitoring server is required.
+Graywatch tells you where a Linux node is losing time: the disks, a FUSE
+storage client, memory, the network or the CPU. You run one command while the
+problem is happening and get a short report. It names the most likely cause
+first and says what to check next.
 
-The current implementation provides:
+Nothing needs to be installed and nothing needs a reboot. There is no server,
+agent or dashboard.
+
+## Quick start
+
+1. Copy the bundle to the affected node and unpack it:
+
+   ```sh
+   tar -xzf graywatch-portable-*-linux-x86_64.tar.gz
+   cd graywatch-portable-*-linux-x86_64
+   ```
+
+2. While the problem is happening, run the collector as root:
+
+   ```sh
+   sudo ./collect-graywatch-support.sh
+   ```
+
+   It collects for 60 seconds (`--duration` changes that), then prints the
+   path of the archive it wrote, typically a few hundred KB.
+
+3. Read `report.txt` inside it, or send the archive to whoever helps you:
+
+   ```sh
+   tar -xOzf graywatch-support-*.tar.gz ./report.txt | less
+   ```
+
+The collector cleans up after itself: when it ends, the archive is the only
+thing left on the node. On a 72-CPU node the eBPF probes added about 0.01% CPU
+and the helper process about 5% of one core.
+
+## What you get
+
+| Run as | PSI | You get | You miss |
+|---|---|---|---|
+| root | on | everything below | nothing |
+| root | off | disk latency and queueing; stuck and slow FUSE requests; blocked threads with their kernel stacks; memory reclaim, swap and OOM; TCP and InfiniBand; the kernel log | CPU pressure verdict, memory stall percentages |
+| user | on or off | disk, memory and network health; CPU wait per thread | everything that needs eBPF (stuck FUSE requests, kernel stacks, which connections retransmit, who stalled in reclaim), often the kernel log, hidden processes |
+
+**Run it as root.** Root matters far more than PSI. In the fio test on the
+playground, the main finding was a FUSE CREATE request that the storage client
+never answered. That finding came from eBPF, which needs root. A thread waiting
+for FUSE usually does not even show up as blocked (`D`) in `ps`.
+
+**PSI is usually off on RHEL, Rocky and AlmaLinux.** The kernel has it, but it
+is disabled until the node boots with `psi=1`. Graywatch works without it, and
+the report says what was missing. Ubuntu, Debian and Fedora usually have it
+on. See [Enabling PSI](#enabling-psi).
+
+## Reading the report
+
+The report has these parts, from most to least important:
+
+- **Verdict:** CRITICAL, WARNING, or no degradation detected.
+- **Assessment:** the conclusion in a few sentences, most likely cause first.
+  When an assessment says a signal is context, it happened at the same time
+  but probably did not cause the problem.
+- **Findings:** numbered, worst first, each with its evidence and next steps.
+- **Timeline, resource overview and collection coverage:** details, and what
+  could not be collected.
+
+An excerpt from the fio test:
+
+```text
+Verdict: CRITICAL. 14 findings need attention (4 critical).
+
+Assessment
+----------
+
+* A FUSE CREATE request on /quobyte waited 482 s without an answer. The FUSE
+  daemon (the storage client) or the service it depends on stopped answering:
+  start with that daemon's logs and its connections to its storage service.
+  Disk, memory and network findings from the same window are context unless they
+  show errors.
+```
+
+If nothing was wrong during the collection, the verdict says so. Collect again
+while the problem is happening.
+
+## Features
+
+Beyond the collector, Graywatch has an optional always-on daemon (`graywatchd`)
+with a local query interface, and an eBPF helper. The current implementation
+provides:
 
 - CPU, memory, and I/O pressure from Linux PSI when the kernel exposes it;
 - memory health from reclaim, swap, refault, and OOM-kill counters, with or
@@ -19,7 +102,7 @@ The current implementation provides:
 - system-wide TCP retransmission/error intervals;
 - InfiniBand link state, rate, congestion, and error-counter intervals;
 - current-state queries and resource-filtered subscriptions over a local Unix
-  socket; and
+  socket;
 - a stateless multi-node support snapshot over SSH; and
 - a portable incident bundle plus a report tool (`graywatch-report`, C++, no
   Python) that turns its archive into a summary for support engineers.
@@ -55,8 +138,8 @@ cat /proc/pressure/cpu /proc/pressure/memory /proc/pressure/io
 A `psi=0` argument disables PSI explicitly and must be removed instead
 (`grubby --update-kernel=ALL --remove-args=psi`). Distribution defaults
 differ and change between releases, so check rather than assume. The support
-collector records which of these cases applies as `psi_status` in `system.txt`, and the report tool prints the
-matching instructions.
+collector records which of these cases applies as `psi_status` in `system.txt`,
+and the report tool prints the matching instructions.
 
 With PSI enabled, Graywatch additionally reports:
 
@@ -190,10 +273,11 @@ needs the target's glibc 2.34 or later, `libelf.so.1`, `libz.so.1` and
 because Rocky 9 ships no static libelf. See
 [eBPF helper](#ebpf-helper-graywatch-bpf).
 
-Root is optional. It improves visibility into other users' processes and their
-wait channels, lets the script read the kernel log where `dmesg_restrict` is
-set, and is required for the eBPF helper. A non-root collection still reports all readable CPU, memory, block,
-TCP, and InfiniBand evidence. The support archive contains:
+Root is optional but recommended (see [What you get](#what-you-get)). It
+improves visibility into other users' processes and their wait channels, lets
+the script read the kernel log where `dmesg_restrict` is set, and is required
+for the eBPF helper. A non-root collection still reports all readable CPU,
+memory, block, TCP, and InfiniBand evidence. The support archive contains:
 
 - `system.txt`: kernel/OS identity, CPU count, kernel command line, PSI status,
   cgroup filesystem, and procfs/sysfs mount options;
@@ -435,9 +519,9 @@ severity, raw PSI evidence, selection scope, and affected thread evidence.
 
 ## Local daemon
 
-`graywatchd` samples CPU/task, memory, block, TCP, and InfiniBand evidence, keeps the
-latest state for each resource, and publishes matching future events through a
-Unix-domain socket:
+`graywatchd` samples CPU/task, memory, block, TCP, InfiniBand and FUSE evidence,
+keeps the latest state for each resource, and publishes matching future events
+through a Unix-domain socket:
 
 ```sh
 ./build/graywatchd --socket /tmp/graywatchd.sock --interval 1 \
@@ -466,11 +550,14 @@ lifetime facts, such as whether an InfiniBand port was ever active or ever
 carried traffic. To see a time window, use `subscribe` (every event as it
 happens) or the support collector, which records every interval to
 `events.jsonl` and summarizes the window in `report.txt`.
+
 `subscribe` remains connected and prints future events matching both the
 resource and minimum severity. Use `--resource all` (the default) for every
-resource and add `--count N` for a bounded subscription. The protocol supports `GET` (CPU), `GET io`, `GET memory`, `GET network`,
-`GET fuse` and `SUBSCRIBE <minimum-severity> [cpu|io|memory|network|fuse|all]` as
-newline-delimited commands. Omitting the protocol resource retains the original `all` behavior.
+resource and add `--count N` for a bounded subscription. The protocol accepts
+these newline-delimited commands: `GET` (CPU), `GET io`, `GET memory`,
+`GET network`, `GET fuse` and
+`SUBSCRIBE <minimum-severity> [cpu|io|memory|network|fuse|all]`. Without a
+resource, `SUBSCRIBE` means `all`.
 The daemon refuses to replace an existing socket path, preventing it from
 unlinking another live service accidentally.
 
@@ -728,9 +815,12 @@ The default paths are:
 
 Persistent interval logging is opt-in with `graywatchd --log PATH`. The default
 systemd service keeps current state in memory and publishes subscriptions but
-does not log every raw interval; doing so continuously can consume hundreds of
-megabytes per node per day. A later event policy will persist state transitions
-and degradation events without turning Graywatch into a time-series database.
+does not log every raw interval. Doing so continuously is expensive: on a
+72-CPU playground node with nine block devices, `--log` wrote 9.3 MB in 11
+minutes, about 1.2 GB per day (about 47 MB per day compressed). The daemon does
+not reopen the file, so it cannot be rotated cleanly. A later event policy will
+persist state transitions and degradation events without turning Graywatch into
+a time-series database.
 
 `noexec`, `nodev`, and `nosuid` mount options do not prevent Unix socket
 creation. Socket creation can fail when the filesystem is read-only, the daemon
@@ -826,9 +916,10 @@ SSH runs with `BatchMode=yes`, so key-based access is required.
 availability, waiting-thread counts, the thread with the largest absolute
 scheduler wait, memory condition, one block device, FUSE state, and current
 TCP/InfiniBand issues. Never-used `inactive` ports are not listed as issues.
-Each column is as wide as its widest value. The DEVICE column shows the most severe `congested`, `saturated` or `degraded`
-device with its condition. With none, it shows the busiest healthy device at
-1% busy or more, otherwise `-`. The FUSE column shows `STALLED <mount> <s>s`
+Each column is as wide as its widest value. The DEVICE column shows the most
+severe `congested`, `saturated` or `degraded` device with its condition. With
+none, it shows the busiest healthy device at 1% busy or more, otherwise `-`. The
+FUSE column shows `STALLED <mount> <s>s`
 for a stalled mount (with `+N` for more), else `active w=N` (N requests
 waiting), `idle`, `no-access` when the daemon cannot read fusectl (see the FUSE
 resource above), or `-` when the host has no FUSE mount or its daemon predates
@@ -847,7 +938,8 @@ HOST            CPU/PSI          WAIT  TOP THREAD                 MEMORY        
 ```
 
 The same nodea while 144 busy loops and a read-only `fio` random read on
-`nvme0n1` ran (recorded with fixed column widths, before the FUSE column was added):
+`nvme0n1` ran (recorded with fixed column widths, before the FUSE column was
+added):
 
 ```text
 HOST                   CPU/PSI                WAIT TOP THREAD                 MEMORY                 DEVICE                             NETWORK
