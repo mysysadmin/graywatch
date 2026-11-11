@@ -395,7 +395,10 @@ The report contains:
 - collection coverage: root or not, PSI status with how to enable it,
   `hidepid`, sampling gaps, and daemon errors.
 
-Text and Markdown output wrap at 80 columns. The thresholds in the report are
+When more than eight devices share a kind of finding (unhealthy block devices,
+or devices slow to service one request type), the report shows one grouped
+finding with the typical device, the five worst and the full list, instead of
+one finding per device. Text and Markdown output wrap at 80 columns. The thresholds in the report are
 triage heuristics. The daemon's per-interval
 `condition` remains the authoritative classification.
 

@@ -359,6 +359,50 @@ void test_daemon_fuse() {
             "daemon FUSE stall leads the assessment");
     require(any_contains(report.coverage, "/mnt/other: the daemon could not read"),
             "unreadable fusectl noted");
+    require(!any_contains(stalled->details, "background requests"), "no eBPF, no guess");
+
+    // eBPF ran and saw no synchronous request waiting: background requests.
+    files["bpf-events.jsonl"] =
+        R"({"event_type":"bpf_status","collectors":[{"name":"fuse","enabled":true}]})" "\n";
+    const auto with_bpf = graywatch::report::analyze(files);
+    const auto* background = find(with_bpf, "FUSE mount /quobyte made no progress");
+    require(background && any_contains(background->details, "background requests") &&
+                !any_contains(background->details, "eBPF FUSE findings name"),
+            "stall without a synchronous wait is called background");
+    require(any_contains(with_bpf.conclusions, "most likely background reads or writeback"),
+            "assessment mentions background requests");
+}
+
+void test_device_grouping() {
+    auto files = bundle(false);
+    std::string events = files["events.jsonl"];
+    std::string bpf =
+        R"({"event_type":"bpf_status","collectors":[{"name":"block","enabled":true}]})" "\n";
+    for (int disk = 0; disk < 12; ++disk) {
+        const std::string name = std::string("sd") + static_cast<char>('b' + disk);
+        for (int second = 1; second <= 40; ++second) {
+            const bool slow = second >= 12 && second <= 16;
+            events += io_event(second, name, slow ? 150.0 + disk * 10.0 : 5.0) + "\n";
+        }
+        bpf += R"({"event_type":"bpf_interval","collector":"block","timestamp":")" + ts(20) +
+               R"(","device":")" + name + R"(","operation":"flush","errors":0,"direct_issue":0,)"
+               R"("service":{"count":100,"total_ms":3000,"max_ms":)" +
+               std::to_string(100 + disk) + R"(,"histogram_us":{"65536":100}},)"
+               R"("queue":{"count":100,"total_ms":1,"max_ms":0.1,"histogram_us":{"16":100}}})" "\n";
+    }
+    files["events.jsonl"] = events;
+    files["bpf-events.jsonl"] = bpf;
+    const auto report = graywatch::report::analyze(files);
+    const auto* group = find(report, "12 of 13 active block devices non-healthy");
+    require(group && group->severity == Severity::critical, "devices grouped above the limit");
+    require(find(report, "Block device sdb:") == nullptr, "no per-device findings when grouped");
+    require(any_contains(group->details, "Worst by p95") &&
+                any_contains(group->details, "  sdm: p50"),
+            "worst device listed first");
+    const auto* flush = find(report, "12 devices are slow to service flush requests");
+    require(flush && flush->severity == Severity::warning, "eBPF slow devices grouped");
+    require(find(report, "Device sdb is slow") == nullptr, "no per-device eBPF findings");
+    require_width(report);
 }
 
 void test_render() {
@@ -389,6 +433,7 @@ int main() {
         test_bpf();
         test_incident_triage();
         test_daemon_fuse();
+        test_device_grouping();
         test_render();
     } catch (const std::exception& error) {
         std::cerr << "report_test: " << error.what() << '\n';

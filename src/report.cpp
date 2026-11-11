@@ -215,9 +215,11 @@ const std::vector<WaitHint>& wait_hints() {
     return hints;
 }
 
-std::pair<std::string, std::string> classify_wait_channel(const std::string& channel) {
+std::pair<std::string, std::string> classify_wait_channel(const std::string& channel, bool root) {
     if (channel.empty()) {
-        return {"hidden", "wait channel not visible (collect as root to see it)"};
+        return {"hidden", root ? "wait channel not reported by this kernel; the eBPF kernel "
+                                 "stacks show where threads waited"
+                               : "wait channel not visible (collect as root to see it)"};
     }
     for (const auto& hint : wait_hints()) {
         for (const auto& needle : hint.needles) {
@@ -371,6 +373,90 @@ std::map<std::string, DeviceInfo> block_topology(const std::string& text) {
     return info;
 }
 
+// Above this many devices with the same kind of finding, the report shows one
+// grouped finding with the typical and the worst devices instead of one
+// finding per device: storage servers have dozens of disks, and a page per
+// disk hides the pattern.
+inline constexpr std::size_t group_limit = 8;
+inline constexpr std::size_t group_worst = 5;
+
+class DeviceGroup {
+  public:
+    void add(const std::string& name, Severity severity, double metric,
+             const std::vector<std::string>& labels, const std::vector<std::string>& steps,
+             std::string line) {
+        members_.push_back({name, severity, metric, std::move(line)});
+        for (const auto& label : labels) unique_push(labels_, label);
+        for (const auto& step : steps) unique_push(steps_, step);
+    }
+    bool empty() const { return members_.empty(); }
+    std::size_t size() const { return members_.size(); }
+    Severity severity() const {
+        Severity worst = Severity::info;
+        for (const auto& member : members_) worst = std::min(worst, member.severity);
+        return worst;
+    }
+    std::string labels() const { return join(labels_, ", "); }
+    std::vector<std::string> worst_names(std::size_t count) const {
+        std::vector<std::string> names;
+        for (const auto* member : ranked()) {
+            if (names.size() == count) break;
+            names.push_back(member->name);
+        }
+        return names;
+    }
+    // typical_format takes the median metric as its only argument.
+    std::vector<std::string> details(const char* typical_format, const char* worst_heading) const {
+        std::size_t critical{}, warning{}, info{};
+        std::vector<double> metrics;
+        std::vector<std::string> names;
+        for (const auto& member : members_) {
+            metrics.push_back(member.metric);
+            names.push_back(member.name);
+            (member.severity == Severity::critical ? critical
+             : member.severity == Severity::warning ? warning
+                                                     : info)++;
+        }
+        std::sort(names.begin(), names.end(), [](const std::string& a, const std::string& b) {
+            return a.size() != b.size() ? a.size() < b.size() : a < b;
+        });
+        std::vector<std::string> lines{
+            format("%zu critical, %zu warning, %zu info.", critical, warning, info),
+            format(typical_format, percentile(metrics, 0.50)), worst_heading};
+        const auto order = ranked();
+        for (std::size_t index = 0; index < order.size() && index < group_worst; ++index) {
+            lines.push_back("  " + order[index]->line);
+        }
+        lines.push_back("All: " + join(names, ", ") + ".");
+        return lines;
+    }
+    std::vector<std::string> steps(std::vector<std::string> first) const {
+        for (const auto& step : steps_) unique_push(first, step);
+        return first;
+    }
+
+  private:
+    struct Member {
+        std::string name;
+        Severity severity;
+        double metric;
+        std::string line;
+    };
+    static void unique_push(std::vector<std::string>& list, const std::string& value) {
+        if (std::find(list.begin(), list.end(), value) == list.end()) list.push_back(value);
+    }
+    std::vector<const Member*> ranked() const {
+        std::vector<const Member*> order;
+        for (const auto& member : members_) order.push_back(&member);
+        std::stable_sort(order.begin(), order.end(),
+                         [](const Member* a, const Member* b) { return a->metric > b->metric; });
+        return order;
+    }
+    std::vector<Member> members_;
+    std::vector<std::string> labels_;
+    std::vector<std::string> steps_;
+};
+
 class Analysis {
   public:
     explicit Analysis(const Files& files) : files_(files) {}
@@ -384,6 +470,7 @@ class Analysis {
         check_network();
         check_fuse();
         check_bpf();
+        annotate_fuse_stalls();
         check_kernel_log();
         correlate();
         // Within a severity, hung requests (nothing is answering) come before
@@ -418,6 +505,28 @@ class Analysis {
             if (collector.string("name") == name) return collector.boolean("enabled", false);
         }
         return false;
+    }
+
+    bool root() const { return system("uid") == "0"; }
+
+    // The daemon's fusectl counter includes background requests (readahead,
+    // writeback, async I/O) that the eBPF hook on synchronous requests does
+    // not see. When eBPF ran and saw no long wait on a stalled mount, say so.
+    void annotate_fuse_stalls() {
+        if (!bpf_enabled("fuse")) return;
+        for (const auto& [path, index] : fuse_stall_finding_) {
+            if (bpf_stuck_mounts_.contains(path)) continue;
+            auto& details = report_.findings[index].details;
+            if (details.size() > 1) details.pop_back();  // "The eBPF FUSE findings name ..."
+            details.push_back("eBPF saw no synchronous request on this mount waiting that long, "
+                              "so the waiting requests are most likely background requests "
+                              "(readahead, writeback or asynchronous I/O) waiting on the storage "
+                              "service.");
+            if (fuse_stuck_from_fusectl_ == path && fuse_stuck_.starts_with("The FUSE mount ")) {
+                fuse_stuck_ += " eBPF saw no synchronous request waiting that long, so these "
+                               "are most likely background reads or writeback.";
+            }
+        }
     }
 
     void add(Severity severity, std::string area, std::string title,
@@ -691,7 +800,7 @@ class Analysis {
             double worst_stuck{};
             for (std::size_t index = 0; index < ordered.size() && index < 10; ++index) {
                 const auto& [key, entry] = ordered[index];
-                const auto [category, meaning] = classify_wait_channel(key.second);
+                const auto [category, meaning] = classify_wait_channel(key.second, root());
                 blocked_categories_[category] += entry.snapshots;
                 const double consecutive = static_cast<double>(longest[key]) * interval;
                 Measured seen;
@@ -752,7 +861,7 @@ class Analysis {
                 steps.push_back("Lock waits: the eBPF off-CPU stacks show the code path; capture "
                                 "`cat /proc/PID/task/TID/stack` as root to find the lock holder.");
             }
-            if (blocked_categories_.contains("hidden")) {
+            if (blocked_categories_.contains("hidden") && !root()) {
                 steps.push_back("Re-run the collection as root to reveal hidden wait channels.");
             }
             steps.push_back("For any thread stuck for minutes, capture `echo w > "
@@ -943,6 +1052,8 @@ class Analysis {
         std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
             return a.second->bad.size() > b.second->bad.size();
         });
+        const std::size_t active_devices = devices.size() - idle.size();
+        DeviceGroup group;
         for (const auto& [name, row] : ordered) {
             std::map<std::string, std::size_t> conditions;
             std::map<std::string, std::size_t> reasons;
@@ -984,10 +1095,19 @@ class Analysis {
             }
             std::vector<std::string> names;
             for (const auto& [condition, count] : conditions) names.push_back(condition);
-            add(degraded >= 3 ? Severity::critical
+            const Severity severity =
+                degraded >= 3 ? Severity::critical
                               : (degraded > 0 || row->bad.size() >= 3 ? Severity::warning
-                                                                       : Severity::info),
-                "io", "Block device " + device_label(name) + ": " + join(names, ", "),
+                                                                       : Severity::info);
+            if (ordered.size() > group_limit) {
+                group.add(name, severity, row->p95, names, steps,
+                          format("%s: p50 %.2f / p95 %.2f / max %.2f ms, busy max %.0f%%, queue "
+                                 "depth max %.1f, %zu of %zu intervals non-healthy.",
+                                 device_label(name).c_str(), row->p50, row->p95, row->maximum,
+                                 row->busy, row->queue, row->bad.size(), row->active));
+                continue;
+            }
+            add(severity, "io", "Block device " + device_label(name) + ": " + join(names, ", "),
                 {format("%zu of %zu active intervals non-healthy: %s.", row->bad.size(),
                         row->active, counts_text(conditions).c_str()),
                  format("Average latency per interval: p50 %.2f ms, p95 %.2f ms, max %.2f ms. Max "
@@ -996,6 +1116,17 @@ class Analysis {
                  "Reasons: " + counts_text(reasons)},
                 std::move(steps));
         }
+        if (group.empty()) return;
+        io_worst_ = group.worst_names(3);
+        add(group.severity(), "io",
+            format("%zu of %zu active block devices non-healthy: ", group.size(),
+                   active_devices) + group.labels(),
+            group.details("Average latency per interval of the typical device (median): p95 %.2f "
+                          "ms.", "Worst by p95 latency:"),
+            group.steps({"Many devices degrading together usually means shared demand or a "
+                         "shared component (controller, expander, the storage service's "
+                         "workload), not failing disks. Devices far above the typical one are "
+                         "the ones to check first."}));
     }
 
     // -- network -------------------------------------------------------------
@@ -1178,7 +1309,9 @@ class Analysis {
                 fuse_stuck_ = format("The FUSE mount %s answered nothing for %.0f s (%.0f requests "
                                      "waiting).", path.c_str(), seconds,
                                      evidence.number("waiting_requests", 0.0));
+                fuse_stuck_from_fusectl_ = path;
             }
+            fuse_stall_finding_[path] = report_.findings.size();
             add(Severity::critical, "fuse", "FUSE mount " + path + " made no progress",
                 {format("%.0f requests were waiting for the FUSE daemon with no change for %.0f s "
                         "(at %s); %zu of %zu intervals were stalled.",
@@ -1275,6 +1408,7 @@ class Analysis {
                 worst_p99 = std::max(worst_p99, std::max(p99, op.histogram.max_ms));
             }
             if (op.oldest_ms >= 5000.0) {
+                bpf_stuck_mounts_.insert(mount);
                 stuck.push_back(format(
                     "%s %s request outstanding for %.1f s at %s%s.", mount.c_str(), opcode.c_str(),
                     op.oldest_ms / 1000.0, clock_of(op.oldest_at).c_str(),
@@ -1324,6 +1458,11 @@ class Analysis {
             double errors{};
             double direct{};
         };
+        struct Slow {
+            std::string device;
+            double p99{}, max{}, count{};
+        };
+        std::map<std::string, std::vector<Slow>> slow;  // by operation
         std::map<std::pair<std::string, std::string>, Op> operations;
         for (const auto* event : bpf_by_collector_["block"]) {
             auto& op = operations[{event->string("device"), event->string("operation")}];
@@ -1375,14 +1514,8 @@ class Analysis {
             }
             if (op.service.count < 10) continue;
             if (service_p99 >= 50.0) {
-                add(service_p99 >= 500.0 ? Severity::critical : Severity::warning, "io",
-                    format("Device %s is slow to service %s requests", device.c_str(),
-                           operation.c_str()),
-                    {format("Device service time (dispatch to completion) p99 <= %.1f ms, max "
-                            "%.1f ms over %.0f requests.", service_p99, op.service.max_ms,
-                            op.service.count)},
-                    {"Slow service time is the device itself (or its transport): check its "
-                     "health, firmware and, for network block devices, the path to the target."});
+                slow[operation].push_back({device, service_p99, op.service.max_ms,
+                                           op.service.count});
             } else if (op.queue.count >= 10 && queue_p99 >= 20.0 && queue_p99 >= 10.0 * service_p99) {
                 add(Severity::warning, "io",
                     format("Requests to %s wait in the queue, not in the device", device.c_str()),
@@ -1393,6 +1526,40 @@ class Analysis {
                      "throttling (check `/sys/block/DEV/queue/scheduler`, io.max/io.latency "
                      "cgroup limits and the I/O sources with `iotop -o`)."});
             }
+        }
+        const std::string advice = "Slow service time is the device itself (or its transport): "
+                                   "check its health, firmware and, for network block devices, "
+                                   "the path to the target.";
+        for (const auto& [operation, devices] : slow) {
+            const auto severity_of = [](const Slow& entry) {
+                return entry.p99 >= 500.0 ? Severity::critical : Severity::warning;
+            };
+            if (devices.size() <= group_limit) {
+                for (const auto& entry : devices) {
+                    add(severity_of(entry), "io",
+                        format("Device %s is slow to service %s requests", entry.device.c_str(),
+                               operation.c_str()),
+                        {format("Device service time (dispatch to completion) p99 <= %.1f ms, "
+                                "max %.1f ms over %.0f requests.", entry.p99, entry.max,
+                                entry.count)},
+                        {advice});
+                }
+                continue;
+            }
+            DeviceGroup group;
+            for (const auto& entry : devices) {
+                group.add(entry.device, severity_of(entry), entry.max, {}, {},
+                          format("%s: p99 <= %.1f ms, max %.1f ms over %.0f requests.",
+                                 entry.device.c_str(), entry.p99, entry.max, entry.count));
+            }
+            add(group.severity(), "io",
+                format("%zu devices are slow to service %s requests", devices.size(),
+                       operation.c_str()),
+                group.details("Device service time (dispatch to completion) of the typical "
+                              "device (median of the maximum): %.1f ms.", "Worst:"),
+                group.steps({"Many devices slow together points at shared demand or a shared "
+                             "component (controller, expander, the workload) rather than "
+                             "the devices themselves. " + advice}));
         }
     }
 
@@ -1717,8 +1884,12 @@ class Analysis {
             }
         }
         if (blocked_categories_.contains("block") && !unhealthy_io_.empty()) {
-            conclusions.push_back("Threads waited on block I/O and " +
-                                  join({unhealthy_io_.begin(), unhealthy_io_.end()}, ", ") +
+            const std::string devices =
+                io_worst_.empty()
+                    ? join({unhealthy_io_.begin(), unhealthy_io_.end()}, ", ")
+                    : format("%zu block devices (worst ", unhealthy_io_.size()) +
+                          join(io_worst_, ", ") + ")";
+            conclusions.push_back("Threads waited on block I/O and " + devices +
                                   " showed degraded or congested service: start with the storage "
                                   "device findings.");
         }
@@ -1751,6 +1922,10 @@ class Analysis {
     std::optional<double> window_start_;
     std::map<std::string, std::size_t> blocked_categories_;
     std::set<std::string> unhealthy_io_;
+    std::vector<std::string> io_worst_;  // worst devices when check_io grouped them
+    std::map<std::string, std::size_t> fuse_stall_finding_;  // mount -> finding index
+    std::set<std::string> bpf_stuck_mounts_;
+    std::string fuse_stuck_from_fusectl_;  // mount whose fusectl stall set fuse_stuck_
     bool psi_cpu_{};
     bool network_bad_{};
     bool network_load_{};      // congestion or retransmits, no errors
@@ -1929,7 +2104,11 @@ std::string render(const Report& report, Format format_kind) {
         const std::string title = format("%zu. [%s] ", index + 1, level.c_str()) + finding.title;
         if (markdown) wrapped("**" + title + "**", "", "");
         else wrapped(title, "", std::string(title.find(']') + 2, ' '));
-        for (const auto& line : finding.details) bullet(line, 1);
+        // A detail starting with two spaces belongs to the one before it.
+        for (const auto& line : finding.details) {
+            const bool nested = line.starts_with("  ");
+            bullet(nested ? line.substr(2) : line, nested ? 2 : 1);
+        }
         if (!finding.next_steps.empty()) {
             out << (markdown ? "  Next steps:\n" : "   Next steps:\n");
             for (const auto& line : finding.next_steps) bullet(line, 2);
