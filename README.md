@@ -264,6 +264,25 @@ in the installation command above. Override `GRAYWATCH_PORTABLE_BUILD_DIR` or
 `GRAYWATCH_PORTABLE_OUTPUT_DIR` when build and artifact directories must live
 elsewhere.
 
+The bundle also carries `LICENSE`, `THIRD_PARTY_NOTICES` (libbpf, glibc and
+the GCC runtime, which are linked into the binaries) and `licenses/`.
+
+To publish a build for download, run on a host with Docker and a logged-in
+`gh` (`gh auth status`), from a clean, pushed commit:
+
+```sh
+tools/publish-release.sh
+```
+
+It builds the bundle and creates a release in the public
+`mysysadmin/graywatch-releases` repository (`GRAYWATCH_RELEASE_REPO` changes
+it), with the bundle under its versioned name and under a fixed name. The
+source stays private, and this link always downloads the newest build:
+
+```text
+https://github.com/mysysadmin/graywatch-releases/releases/latest/download/graywatch-portable-linux-x86_64.tar.gz
+```
+
 Copy the archive to an affected machine, extract it in a temporary directory,
 and run a bounded collection without installing a package or service:
 

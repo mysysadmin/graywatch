@@ -12,7 +12,10 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
-char LICENSE[] SEC("license") = "GPL";
+// The project is MIT licensed. The kernel only lets GPL-compatible programs
+// use GPL-only helpers such as bpf_probe_read_kernel, which BPF_CORE_READ
+// uses, so the program declares both.
+char LICENSE[] SEC("license") = "Dual MIT/GPL";
 
 #define TASK_RUNNING 0x0
 #define TASK_UNINTERRUPTIBLE 0x2

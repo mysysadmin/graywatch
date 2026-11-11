@@ -73,7 +73,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/graywatchd.service"
     DESTINATION "${GRAYWATCH_SYSTEMD_UNIT_DIR}")
 install(FILES packaging/graywatch.conf
     DESTINATION "${GRAYWATCH_SYSUSERS_DIR}")
-install(FILES README.md LICENSE packaging/graywatchd-fuse.conf
+install(FILES README.md LICENSE THIRD_PARTY_NOTICES licenses/LGPL-2.1.txt packaging/graywatchd-fuse.conf
     DESTINATION "${CMAKE_INSTALL_DOCDIR}")
 
 include(CTest)

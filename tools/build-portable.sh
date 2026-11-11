@@ -52,6 +52,10 @@ if [ "$bpf_mode" != 0 ]; then
     fi
 fi
 install -m 0644 "$root/portable/README.txt" "$stage/README.txt"
+install -m 0644 "$root/LICENSE" "$stage/LICENSE"
+install -m 0644 "$root/THIRD_PARTY_NOTICES" "$stage/THIRD_PARTY_NOTICES"
+mkdir -p "$stage/licenses"
+install -m 0644 "$root/licenses/LGPL-2.1.txt" "$stage/licenses/LGPL-2.1.txt"
 
 for binary in graywatchd graywatchctl graywatch-report; do
     if ldd "$stage/bin/$binary" 2>&1 | grep -qv "not a dynamic executable"; then

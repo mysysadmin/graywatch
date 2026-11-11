@@ -1,0 +1,72 @@
+THIRD-PARTY NOTICES
+
+Graywatch itself is licensed under the MIT License (see LICENSE). The eBPF
+program inside graywatch-bpf declares the license "Dual MIT/GPL" so that the
+kernel allows it to use GPL-only helpers.
+
+The portable bundle contains the following third-party code.
+
+------------------------------------------------------------------------------
+libbpf 1.5.0
+------------------------------------------------------------------------------
+
+Statically linked into bin/graywatch-bpf; its BPF headers are compiled into
+the eBPF program. Source: https://github.com/libbpf/libbpf (tag v1.5.0).
+libbpf is licensed LGPL-2.1 OR BSD-2-Clause; Graywatch uses it under the
+BSD-2-Clause license:
+
+  Copyright (c) 2015 The Libbpf Authors. All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
+
+  1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+
+  2. Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+
+------------------------------------------------------------------------------
+GNU C Library (glibc) 2.34, Rocky Linux 9 build glibc-2.34-284.el9_8.4
+------------------------------------------------------------------------------
+
+Statically linked into bin/graywatchd, bin/graywatchctl and
+bin/graywatch-report. graywatch-bpf uses the system's glibc dynamically.
+
+glibc is licensed under the GNU Lesser General Public License, version 2.1 or
+later; the full text is in licenses/LGPL-2.1.txt. You may modify glibc and
+relink the Graywatch executables against your modified version. The glibc
+source is available from Rocky Linux (glibc-2.34-284.el9_8.4.src.rpm) and
+from https://sourceware.org/glibc/. The Graywatch object files needed to
+relink are available on request from whoever gave you this bundle, for at
+least three years after they did.
+
+------------------------------------------------------------------------------
+GCC runtime libraries (libstdc++, libgcc) 11.5.0
+------------------------------------------------------------------------------
+
+Statically linked into all four executables. Licensed under the GNU General
+Public License, version 3, with the GCC Runtime Library Exception 3.1, which
+places no conditions on programs compiled with GCC.
+https://www.gnu.org/licenses/gcc-exception-3.1.html
+
+------------------------------------------------------------------------------
+Not included
+------------------------------------------------------------------------------
+
+graywatch-bpf loads libelf and zlib from the host system at run time; they are
+not part of the bundle.

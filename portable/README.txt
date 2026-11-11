@@ -85,3 +85,8 @@ Snapshot several nodes over SSH (needs key-based SSH and graywatchctl on each
 node; --remote-command gives its path there):
 
   ./bin/graywatchctl cluster --user root nodea nodeb nodec
+
+LICENSE
+
+  Graywatch is MIT licensed (LICENSE). THIRD_PARTY_NOTICES lists the libraries
+  linked into the binaries and their licenses.
