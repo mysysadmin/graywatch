@@ -276,6 +276,13 @@ const std::vector<KernelPattern>& kernel_patterns() {
     return patterns;
 }
 
+const std::regex& link_down_pattern() {
+    static const std::regex pattern(R"(Link is Down|link down|port .*DOWN|link.*(down|lost))",
+                                    std::regex::ECMAScript | std::regex::icase |
+                                        std::regex::optimize);
+    return pattern;
+}
+
 std::vector<std::string> psi_help(const std::string& status) {
     if (status == "disabled_by_default") {
         return {
@@ -1631,6 +1638,20 @@ class Analysis {
             const auto found = hits.find(pattern.name);
             if (found == hits.end()) continue;
             const auto& [recent, old] = found->second;
+            if (pattern.name == "link flap" && !recent.empty() &&
+                std::none_of(recent.begin(), recent.end(), [](const std::string& entry) {
+                    return std::regex_search(entry, link_down_pattern());
+                })) {
+                // Links that only came up, as at boot or when an interface is
+                // started, did not flap.
+                add(Severity::info, "kernel log",
+                    "Kernel log: links came up (" + plural(recent.size(), "line") +
+                        ", no link down)",
+                    {"Most recent: " + recent.back().substr(0, 200)},
+                    {"Links that come up without going down first are normal at boot or "
+                     "when an interface is started. A flap needs a link down."});
+                continue;
+            }
             if (!recent.empty()) {
                 std::vector<std::string> details{"Most recent:"};
                 for (std::size_t index = recent.size() > 3 ? recent.size() - 3 : 0;

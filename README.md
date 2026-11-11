@@ -24,12 +24,20 @@ agent or dashboard.
    ```
 
    It collects for 60 seconds (`--duration` changes that), then prints the
-   path of the archive it wrote, typically a few hundred KB.
+   path of the archive it wrote, typically a few hundred KB, and of a copy of
+   its report next to it.
 
-3. Read `report.txt` inside it, or send the archive to whoever helps you:
+3. Read the report, or send the archive to whoever helps you:
 
    ```sh
-   tar -xOzf graywatch-support-*.tar.gz ./report.txt | less
+   less graywatch-support-*-report.txt
+   ```
+
+   The same `report.txt` is inside the archive. If the archive was renamed or
+   decompressed on the way, `tar` still reads it:
+
+   ```sh
+   tar -xOf graywatch-support-*.tar* ./report.txt | less
    ```
 
 The collector cleans up after itself: when it ends, the archive is the only
@@ -356,7 +364,8 @@ The report contains:
 - a timeline of the degraded episodes;
 - kernel log matches (I/O errors, NVMe timeouts, hung tasks, OOM, lockups, link
   flaps, filesystem and hardware errors). Matches from more than 15 minutes
-  before the window are reported as history rather than as findings; and
+  before the window are reported as history rather than as findings. Links
+  that only came up, with no link down, as at boot, are info, not a flap; and
 - eBPF findings when `bpf-events.jsonl` is present: FUSE requests still
   waiting for the daemon (critical at 5 s, marked when they were already
   waiting before the collection started), slow FUSE opcodes, block devices

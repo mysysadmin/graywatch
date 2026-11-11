@@ -199,6 +199,20 @@ void test_kernel_log() {
     require(history && history->severity == Severity::info &&
                 history->title == "Kernel log: earlier oom (1 line, before the window)",
             "old kernel line is history");
+
+    const std::string up =
+        "2026-11-07T21:00:05,000000+00:00 bnxt_en 0000:13:00.0 ens3f0np0: NIC Link is Up, "
+        "10000 Mbps\n";
+    files["kernel.log"] = up;
+    report = graywatch::report::analyze(files);
+    const auto* boot = find(report, "Kernel log: links came up");
+    require(boot && boot->severity == Severity::info, "link up only is not a flap");
+    require(find(report, "Kernel log: link flap") == nullptr, "no flap without link down");
+    files["kernel.log"] =
+        "2026-11-07T21:00:03,000000+00:00 bnxt_en 0000:13:00.0 ens3f0np0: NIC Link is Down\n" + up;
+    report = graywatch::report::analyze(files);
+    const auto* flap = find(report, "Kernel log: link flap");
+    require(flap && flap->severity == Severity::warning, "link down then up is a flap");
 }
 
 void test_bpf() {

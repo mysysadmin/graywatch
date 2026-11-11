@@ -221,4 +221,11 @@ if command -v "$reporter" >/dev/null 2>&1; then
         note_error "graywatch-report failed"
 fi
 tar -C "$work" -czf "$output" .
+# A copy of the report next to the archive, so nobody has to unpack it to read
+# it, even when a browser or upload portal renames or decompresses the archive.
+if [ -s "$work/report.txt" ]; then
+    report_copy="${output%.tar.gz}"
+    report_copy="${report_copy%.tgz}-report.txt"
+    cp "$work/report.txt" "$report_copy" && echo "Report: $report_copy" >&2
+fi
 echo "$output"

@@ -9,11 +9,17 @@ QUICK START
 
        sudo ./collect-graywatch-support.sh
 
-     It collects for 60 seconds and prints the path of the archive it wrote.
+     It collects for 60 seconds, then prints the path of the archive it wrote
+     and of a copy of its report next to it.
 
-  2. Read the report inside the archive, or send the archive to support:
+  2. Read the report, or send the archive to support:
 
-       tar -xOzf graywatch-support-*.tar.gz ./report.txt | less
+       less graywatch-support-*-report.txt
+
+     The same report.txt is inside the archive. If the archive was renamed or
+     decompressed on the way, tar still reads it:
+
+       tar -xOf graywatch-support-*.tar* ./report.txt | less
 
   The report starts with a verdict and the most likely cause, then lists the
   findings worst first, each with its evidence and what to check next. If the
