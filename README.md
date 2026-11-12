@@ -266,6 +266,8 @@ elsewhere.
 
 The bundle also carries `LICENSE`, `THIRD_PARTY_NOTICES` (libbpf, glibc and
 the GCC runtime, which are linked into the binaries) and `licenses/`.
+`EBPF.txt` explains what the eBPF programs hook, what they read, that they
+cannot change the system, and how to verify that with `bpftool`.
 
 To publish a build for download, run on a host with Docker and a logged-in
 `gh` (`gh auth status`), from a clean, pushed commit:

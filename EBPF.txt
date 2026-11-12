@@ -1,0 +1,108 @@
+WHAT GRAYWATCH DOES WITH eBPF
+
+Graywatch uses eBPF only to measure. It does not change the kernel, other
+processes, files or network traffic. This file lists exactly what it loads,
+what it reads, and how you can check that on your own node.
+
+
+RUN IT AS ROOT
+
+Loading eBPF programs needs root. Without root, Graywatch can't see stuck
+FUSE requests, kernel stacks of blocked threads, per-device queue and
+service times, or which connections retransmit, and the report loses most
+of its value. Run it with sudo.
+
+
+WHAT IT LOADS
+
+Only tracing programs, attached to observation points:
+
+  Program type        Attached to                     Collector
+  ------------------  ------------------------------  ----------------------
+  fentry, fexit       fuse_simple_request             FUSE request latency
+                      (__fuse_simple_request on
+                      newer kernels)
+  raw_tp              block_rq_insert                 block queue time
+  fentry              blk_mq_start_request            block service time
+  raw_tp              block_rq_complete               block service time
+  tp_btf              sched_switch, sched_wakeup      blocked threads and
+                                                      CPU run-queue delay
+  tp_btf              sched_wakeup_new                CPU run-queue delay
+  tp_btf              tcp_retransmit_skb              TCP retransmits
+  tp_btf              mm_vmscan_direct_reclaim_*      memory reclaim stalls
+                      mm_vmscan_memcg_reclaim_*
+
+fentry, fexit and tp_btf show up as "tracing" in bpftool, raw_tp as
+"raw_tracepoint". A collector whose hook doesn't exist on the running kernel
+is skipped.
+
+The kernel's verifier checks every program before it loads. Tracing
+programs of these types can read kernel data and write only into their own
+maps. They can't change kernel memory, return values or control flow.
+
+
+WHAT IT DOES NOT USE
+
+None of the eBPF features that can change the system:
+
+- bpf_probe_write_user        (writes into a process's memory)
+- bpf_override_return,
+  fmod_ret programs           (change what a kernel function returns)
+- bpf_send_signal             (signals or kills processes)
+- XDP, tc, socket programs    (drop, redirect or rewrite packets)
+- LSM, struct_ops, cgroup
+  programs                    (change security or kernel policy)
+
+It doesn't pin programs or maps in /sys/fs/bpf either, so nothing outlives
+the helper process.
+
+
+WHAT IT READS
+
+Timings and counters, not data:
+
+- FUSE: device, operation (for example CREATE), latency, error count.
+  No file names, no file contents.
+- Block: device, operation (read, write, flush ...), bytes, queue and
+  service time, error count. No sectors, no data.
+- Blocked threads: process id and name, kernel stack, how long it waited.
+- CPU: run-queue delay per cgroup.
+- TCP: local and remote address and port of connections that retransmit,
+  and how often. No packet contents.
+- Memory: cgroup, process id and name, reclaim stall time and pages.
+
+The helper adds these up and passes the totals to graywatchd once a
+second. They end up only in the report and the archive on your node.
+Nothing is sent anywhere.
+
+Besides eBPF, it reads /proc/PID/stack once at the start to find FUSE
+requests that were already waiting before the probes were attached.
+
+
+WHEN IT STOPS
+
+When the collection ends, the helper detaches every program and exits, and
+the kernel unloads them. If the helper is killed, the kernel unloads them
+too, because nothing is pinned.
+
+
+CHECK IT YOURSELF
+
+While a collection is running, in a second shell:
+
+  sudo bpftool prog show       # every program Graywatch loaded, its type
+                               # (tracing or raw_tracepoint) and name
+  sudo bpftool link show       # what each program is attached to
+  sudo bpftool prog dump xlated id ID
+                               # the exact instructions the kernel accepted,
+                               # including every helper call
+
+After it has finished, "sudo bpftool prog show" no longer lists any of its
+programs.
+
+bpftool comes with the bpftool package on RHEL, Rocky and Alma, and with
+linux-tools-common or bpftool on Ubuntu.
+
+To check that you run the build we published, compare the bundle with its
+.sha256 file (sha256sum -c), and the programs in bin/ with SHA256SUMS
+(sha256sum -c SHA256SUMS).

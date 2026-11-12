@@ -31,6 +31,9 @@ ROOT AND PSI
   and slow FUSE requests, kernel stacks of blocked threads, which connections
   retransmit and who stalled in memory reclaim. Root also reads the kernel log.
 
+  EBPF.txt lists every eBPF program it loads, what each one reads, that none
+  of them can change the system, and how to check that with bpftool.
+
   PSI (pressure stall information) is optional. It is usually off on RHEL,
   Rocky and AlmaLinux. Without it the report has no CPU pressure verdict and no
   memory stall percentages; everything else works. Enabling it needs a reboot:

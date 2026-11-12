@@ -54,6 +54,7 @@ fi
 install -m 0644 "$root/portable/README.txt" "$stage/README.txt"
 install -m 0644 "$root/LICENSE" "$stage/LICENSE"
 install -m 0644 "$root/THIRD_PARTY_NOTICES" "$stage/THIRD_PARTY_NOTICES"
+install -m 0644 "$root/EBPF.txt" "$stage/EBPF.txt"
 mkdir -p "$stage/licenses"
 install -m 0644 "$root/licenses/LGPL-2.1.txt" "$stage/licenses/LGPL-2.1.txt"
 
