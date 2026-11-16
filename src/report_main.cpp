@@ -8,7 +8,7 @@
 namespace {
 
 int usage() {
-    std::cerr << "usage: graywatch-report ARCHIVE.tar.gz|DIRECTORY "
+    std::cerr << "usage: graywatch-report ARCHIVE.tar[.gz]|DIRECTORY "
                  "[--format text|markdown|json] [--output PATH]\n";
     return 2;
 }

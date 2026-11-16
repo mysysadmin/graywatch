@@ -3,10 +3,15 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <sstream>
 #include <string>
+
+#include <unistd.h>
 
 namespace {
 
@@ -421,6 +426,27 @@ void test_render() {
     require_width(report);
 }
 
+void test_load_bundle() {
+    // A support archive is read the same whether it is still compressed or
+    // was unpacked to a plain .tar on the way.
+    const auto root = std::filesystem::temp_directory_path() /
+                      ("graywatch-report-test-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "bundle");
+    std::ofstream(root / "bundle" / "system.txt") << "kernel_release=7.0.0\n";
+    const std::string dir = root.string();
+    require(std::system(("tar -C " + dir + "/bundle -czf " + dir + "/a.tar.gz . && "
+                         "tar -C " + dir + "/bundle -cf " + dir + "/a.tar .").c_str()) == 0,
+            "tar failed");
+    for (const char* name : {"a.tar.gz", "a.tar"}) {
+        const auto files = graywatch::report::load_bundle(root / name);
+        require(files.contains("system.txt") &&
+                    files.at("system.txt") == "kernel_release=7.0.0\n",
+                std::string("bundle not read from ") + name);
+    }
+    std::filesystem::remove_all(root);
+}
+
 }  // namespace
 
 int main() {
@@ -435,6 +461,7 @@ int main() {
         test_daemon_fuse();
         test_device_grouping();
         test_render();
+        test_load_bundle();
     } catch (const std::exception& error) {
         std::cerr << "report_test: " << error.what() << '\n';
         return 1;

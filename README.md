@@ -357,6 +357,9 @@ bin/graywatch-report graywatch-incident.tar.gz --format markdown \
 bin/graywatch-report graywatch-incident.tar.gz --format json
 ```
 
+A plain `.tar`, as some upload tools leave the archive after unpacking it,
+works too.
+
 The report contains:
 
 - a verdict and findings ranked critical, warning, or info, each with its

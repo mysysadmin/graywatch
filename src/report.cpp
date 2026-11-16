@@ -1956,7 +1956,9 @@ Files load_bundle(const std::filesystem::path& path) {
     }
     // Members are streamed through tar to stdout one at a time: nothing is
     // written to disk, so hostile member names cannot escape a directory.
-    const auto listing = run_process({"tar", "-tzf", path.string()}, std::chrono::seconds(60));
+    // tar detects the compression itself, so a .tar.gz and an unpacked .tar
+    // (as some upload tools leave it) both work.
+    const auto listing = run_process({"tar", "-tf", path.string()}, std::chrono::seconds(60));
     if (listing.exit_code != 0) {
         throw std::runtime_error("tar cannot list " + path.string() + ": " + listing.error);
     }
@@ -1966,7 +1968,7 @@ Files load_bundle(const std::filesystem::path& path) {
         if (member.empty() || member.back() == '/') continue;
         const std::string base = std::filesystem::path(member).filename().string();
         if (base.empty() || files.contains(base)) continue;
-        const auto content = run_process({"tar", "-xzOf", path.string(), member},
+        const auto content = run_process({"tar", "-xOf", path.string(), member},
                                          std::chrono::seconds(120), maximum_file_bytes);
         if (content.exit_code == 0) files[base] = content.output;
     }
