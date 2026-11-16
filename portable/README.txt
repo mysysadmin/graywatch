@@ -40,6 +40,45 @@ ROOT AND PSI
 
     grubby --update-kernel=ALL --args=psi=1 && reboot
 
+RUN IT AS A SERVICE
+
+  A one-off collection only sees the minute it runs. Installed as a service,
+  graywatchd keeps watching, so it can tell you what happened before anyone
+  noticed, and collect by itself while a problem lasts:
+
+    sudo ./install-graywatch.sh
+
+  This installs to /opt/graywatch and starts two systemd units:
+
+  - graywatchd.service runs unprivileged as the user graywatch and samples
+    every second. It keeps every event of the last 30 minutes in
+    /var/log/graywatch (a flight recorder), and logs each problem period, when
+    a resource was non-healthy for a while and when it recovered, to
+    /var/log/graywatch/changes.jsonl.
+  - graywatch-capture.path starts a full collection as root, with eBPF, when
+    a problem lasts 60 seconds (severity 0.75 or more, for example a stalled
+    FUSE mount or a disk averaging 100 ms per request), at most once an hour.
+    The archives go to /var/lib/graywatch/captures; the newest 10 are kept.
+
+  Every collection on that node, automatic or by hand, then also contains
+  the recorded minutes before it and the problem log, and its report says
+  when the problems began.
+
+  Settings are in /etc/default/graywatch; restart graywatchd after a change.
+  To record all the time instead of only the last 30 minutes:
+
+    GRAYWATCH_KEEP=7d       # 30m is the flight recorder default
+    GRAYWATCH_MAX_SIZE=2G   # the oldest files are deleted first
+
+  Compressed, the recording takes about 50 MB a day on a node with ten disks
+  and several hundred MB on a storage server with a hundred. The daemon uses
+  a few percent of one CPU core, most of it for reading per-thread CPU
+  statistics on busy nodes.
+
+  Without automatic collections:  sudo ./install-graywatch.sh --no-capture
+  Remove, keep the recordings:    sudo ./install-graywatch.sh --uninstall
+  Remove everything:              sudo ./install-graywatch.sh --purge
+
 MORE OPTIONS
 
 Choose the duration and output path, exclude a known-unused InfiniBand port,
@@ -49,11 +88,22 @@ or leave out the kernel log or the eBPF helper:
     --output /tmp/incident-graywatch.tar.gz \
     --ignore-ib-port mlx5_0/2 --no-kernel-log --no-bpf
 
+Write the archive to a directory instead, for example a larger filesystem,
+and keep only the newest five there:
+
+  sudo ./collect-graywatch-support.sh --output-dir /data/graywatch --keep 5
+
+When the graywatchd service records on the node, the collection adds its
+last 30 minutes (--history MINUTES changes that, 0 leaves it out).
+
 The archive contains system metadata (including the kernel command line and
 PSI status), block-device topology, mounts, initial/final CPU, I/O, memory,
 network and FUSE state, raw interval JSON events, eBPF evidence
 (bpf-events.jsonl), the last 5000 kernel log lines, daemon diagnostics, and
-report.txt. Process names, mount points and kernel log lines appear in it.
+report.txt. With the service installed it also holds history-events.jsonl
+(the recorded minutes before the collection), changes.jsonl (the problem
+log) and, for an automatic collection, trigger.json (what asked for it).
+Process names, mount points and kernel log lines appear in it.
 Review it before sharing.
 
 Re-create the report or produce other formats from the archive on any Linux

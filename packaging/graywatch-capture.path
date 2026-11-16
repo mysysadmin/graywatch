@@ -1,0 +1,10 @@
+[Unit]
+Description=Collect Graywatch support data when graywatchd asks for it
+
+[Path]
+# graywatchd (unprivileged) writes this file when a problem lasts; the
+# collection runs as root, so it can use eBPF and read the kernel log.
+PathExists=/run/graywatch/capture-request
+
+[Install]
+WantedBy=multi-user.target

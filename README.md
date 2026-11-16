@@ -44,6 +44,31 @@ The collector cleans up after itself: when it ends, the archive is the only
 thing left on the node. On a 72-CPU node the eBPF probes added about 0.01% CPU
 and the helper process about 5% of one core.
 
+### Run it as a service
+
+A one-off collection only sees its own minute. Installed as a service, the
+daemon keeps watching, records what happened before anyone noticed, and
+collects by itself while a problem lasts:
+
+```sh
+sudo ./install-graywatch.sh   # or --no-capture, --uninstall, --purge
+```
+
+It installs to `/opt/graywatch` and starts:
+
+- `graywatchd.service`, unprivileged as user `graywatch`. It keeps every event
+  of the last 30 minutes in `/var/log/graywatch` (a flight recorder) and logs
+  problem periods to `/var/log/graywatch/changes.jsonl`.
+- `graywatch-capture.path`, which runs a full root collection with eBPF when a
+  problem lasts 60 s at severity 0.75 or more, at most once an hour, into
+  `/var/lib/graywatch/captures` (newest 10 kept).
+
+Every later collection on the node includes the recorded minutes before it
+(`history-events.jsonl`) and the problem log (`changes.jsonl`), and its report
+says when the problems began. `GRAYWATCH_KEEP=7d` in `/etc/default/graywatch`
+records all the time instead; see [Recording and automatic
+collections](#recording-and-automatic-collections).
+
 ## What you get
 
 | Run as | PSI | You get | You miss |
@@ -294,6 +319,13 @@ cd graywatch-portable-COMMIT-linux-x86_64
 sudo ./collect-graywatch-support.sh --duration 60 \
   --output /tmp/graywatch-incident.tar.gz
 ```
+
+`--output-dir DIR` writes the archive under its default name into `DIR`
+instead (created if needed), and `--keep N` then deletes all but the newest
+`N` archives there. With the service recording, `--history MINUTES` (default
+30, 0 for none) and `--history-dir` (default `/var/log/graywatch`) choose the
+recorded minutes added to the archive. `--trigger FILE` is for the capture
+unit: it moves the request into the archive as `trigger.json`.
 
 When Clang, `bpftool`, and the libbpf submodule are present, the bundle also
 contains `bin/graywatch-bpf` (force with `GRAYWATCH_PORTABLE_BPF=1`, skip with
@@ -840,8 +872,12 @@ ctest --test-dir build --output-on-failure
 sudo cmake --install build
 sudo systemd-sysusers
 sudo systemctl daemon-reload
-sudo systemctl enable --now graywatchd
+sudo systemctl enable --now graywatchd graywatch-capture.path
 ```
+
+This installs the same units as the portable `install-graywatch.sh`, with the
+collector as `graywatch-collect`. The portable installer is the simpler way on
+nodes without a build toolchain.
 
 The service creates `/run/graywatch` and `/var/log/graywatch` with systemd's
 `RuntimeDirectory` and `LogsDirectory` features. The socket is mode `0660`,
@@ -855,14 +891,56 @@ The default paths are:
 /run/graywatch/graywatchd.sock
 ```
 
-Persistent interval logging is opt-in with `graywatchd --log PATH`. The default
-systemd service keeps current state in memory and publishes subscriptions but
-does not log every raw interval. Doing so continuously is expensive: on a
-72-CPU playground node with nine block devices, `--log` wrote 9.3 MB in 11
-minutes, about 1.2 GB per day (about 47 MB per day compressed). The daemon does
-not reopen the file, so it cannot be rotated cleanly. A later event policy will
-persist state transitions and degradation events without turning Graywatch into
-a time-series database.
+### Recording and automatic collections
+
+The service records with these `graywatchd` options (all optional; without
+`--record-dir` the daemon writes nothing):
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--record-dir DIR` | off | Record events and problem periods in `DIR` |
+| `--keep DURATION` | `30m` | Delete recorded events older than this (`90s`, `12h`, `7d`) |
+| `--max-size SIZE` | `2G` | Delete the oldest recorded events above this total |
+| `--capture-request FILE` | off | Write `FILE` when a problem lasts, to ask for a collection |
+| `--capture-after DURATION` | `60s` | How long a key must stay at the severity |
+| `--capture-severity X` | `0.75` | Severity that counts (degraded I/O, stalled FUSE, ...) |
+| `--capture-cooldown DURATION` | `1h` | At most one request per this period, across restarts |
+
+The service passes `GRAYWATCH_KEEP`, `GRAYWATCH_MAX_SIZE` and
+`GRAYWATCH_OPTIONS` from `/etc/default/graywatch`, and the capture unit
+`GRAYWATCH_CAPTURE_KEEP` and `GRAYWATCH_CAPTURE_OPTIONS` (collector options).
+
+- **Event recording.** Every event line goes to
+  `events-<UTC start>.jsonl`, in 5-minute files (hourly when `--keep` is more
+  than two hours). Closed files are compressed with gzip in the background.
+  Files are deleted by age and, oldest first, by total size, so the
+  directory never grows past `--max-size`. A full disk loses recording, not
+  the daemon. `--keep 30m` is the flight recorder; `--keep 7d` records all the
+  time. On a 72-CPU playground node with nine block devices, every event is
+  about 1.2 GB a day uncompressed, about 47 MB compressed; a storage server
+  with a hundred disks writes roughly ten times that.
+- **Problem log.** `changes.jsonl` gets a `began` line when a key (`cpu`,
+  `memory`, `io/sdb`, `network/tcp`, `network/ib/mlx5_0/1`, `fuse/MOUNT`) was
+  non-healthy in at least half of its last 30 intervals, with the worst event
+  before that, and an `ended` line with duration and worst condition once at
+  most three of the last 30 were. A disk that is slow every other second is
+  one period, not hundreds, and single spikes are not logged. Idle, healthy,
+  inactive and unavailable (missing data) count as normal. The file rotates
+  at 10 MB to compressed `changes-<UTC>.jsonl.gz`, ten files in all, and gets
+  `daemon_started`, `daemon_stopped` and `capture_requested` markers.
+- **Automatic collection.** When one key stays at `--capture-severity` or
+  more for `--capture-after`, the daemon writes the request file, at most once
+  per `--capture-cooldown`; the last request time is kept in
+  `capture-last` in the record directory. The daemon itself never needs
+  privileges: `graywatch-capture.path` watches the file and starts
+  `graywatch-capture.service`, which runs the collector as root with
+  `--trigger`, so the archive's `trigger.json` and the report's first
+  assessment line say what asked for it.
+
+`graywatchd --log PATH` still writes every event of the daemon's lifetime to
+one file, which is what the collector uses for its own window. The daemon
+reopens the file on `SIGHUP`, so logrotate can rotate it (`postrotate`:
+`systemctl kill -s HUP graywatchd`).
 
 `noexec`, `nodev`, and `nosuid` mount options do not prevent Unix socket
 creation. Socket creation can fail when the filesystem is read-only, the daemon
@@ -1008,6 +1086,6 @@ The eBPF helper provides cgroup run-queue and reclaim attribution, TCP
 connection evidence, and FUSE latency, but only as a standalone root process
 whose output goes to support archives. Feeding that evidence into `graywatchd`
 events through a privilege-separated helper, cgroup-scoped memory pressure,
-asynchronous (readahead/writeback) FUSE timing, and persisted transition-only
-logs remain future work. `graywatchd` and its application clients remain
-unprivileged.
+and asynchronous (readahead/writeback) FUSE timing remain future work.
+`graywatchd` and its application clients remain unprivileged; automatic
+collections run as root through the separate `graywatch-capture` units.

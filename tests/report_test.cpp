@@ -426,6 +426,35 @@ void test_render() {
     require_width(report);
 }
 
+void test_history() {
+    auto files = bundle(false);
+    std::string changes = R"({"timestamp":"2026-11-07T19:00:00.000Z","change":"daemon_started"})" "\n";
+    for (int disk = 0; disk < 5; ++disk) {
+        changes += std::string(R"({"timestamp":"2026-11-07T20:1)") + std::to_string(disk) +
+                   R"(:00.000Z","key":"io/sd)" + static_cast<char>('b' + disk) +
+                   R"(","resource":"io","change":"began","condition":"congested","severity":0.5,"event":null})" "\n";
+    }
+    changes += R"({"timestamp":"2026-11-07T20:30:00.000Z","key":"fuse//quobyte","resource":"fuse","change":"began","condition":"stalled","severity":0.8,"event":null})" "\n"
+               R"({"timestamp":"2026-11-07T20:35:00.000Z","key":"fuse//quobyte","resource":"fuse","change":"ended","began":"2026-11-07T20:30:00.000Z","duration_seconds":300,"worst_condition":"stalled","worst_severity":0.8})" "\n"
+               R"({"timestamp":"2026-11-07T20:59:00.000Z","change":"capture_requested"})" "\n";
+    files["changes.jsonl"] = changes;
+    files["trigger.json"] =
+        R"({"timestamp":"2026-11-07T20:59:00.000Z","key":"io/sdb","condition":"degraded","severity":0.93,"sustained_seconds":60})" "\n";
+    const auto report = graywatch::report::analyze(files);
+    const auto* history = find(report, "Recorded before the collection: 6 problem periods");
+    require(history != nullptr, "history finding");
+    require(history->title.find("ongoing ones since") != std::string::npos, "ongoing span");
+    require(any_contains(history->details, "io: 5 problem periods on 5 devices") &&
+                any_contains(history->details, "5 still ongoing"),
+            "devices summarized");
+    require(any_contains(history->details, "fuse//quobyte stalled from 20:30:00 UTC for 5 min"),
+            "single period listed");
+    require(!report.conclusions.empty() &&
+                report.conclusions.front().starts_with("Automatic collection: graywatchd asked"),
+            "trigger leads the assessment");
+    require_width(report);
+}
+
 void test_load_bundle() {
     // A support archive is read the same whether it is still compressed or
     // was unpacked to a plain .tar on the way.
@@ -462,6 +491,7 @@ int main() {
         test_device_grouping();
         test_render();
         test_load_bundle();
+        test_history();
     } catch (const std::exception& error) {
         std::cerr << "report_test: " << error.what() << '\n';
         return 1;

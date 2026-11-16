@@ -5,6 +5,7 @@
 #include "graywatch/memory_stats.hpp"
 #include "graywatch/network_stats.hpp"
 #include "graywatch/psi.hpp"
+#include "graywatch/recorder.hpp"
 #include "graywatch/task_stats.hpp"
 
 #include <algorithm>
@@ -32,9 +33,15 @@
 namespace {
 
 std::atomic_bool running{true};
+std::atomic_bool reopen_log{false};
 
 void stop(int) {
     running = false;
+}
+
+// SIGHUP reopens --log, so logrotate can move the file away.
+void hangup(int) {
+    reopen_log = true;
 }
 
 struct Options {
@@ -44,6 +51,13 @@ struct Options {
     std::size_t top_threads{20};
     double task_interval_seconds{5.0};
     std::set<std::string> ignored_ib_ports;
+    std::optional<std::filesystem::path> record_dir;
+    std::chrono::seconds keep{std::chrono::minutes(30)};
+    std::uint64_t max_size{2ull << 30};
+    std::optional<std::filesystem::path> capture_request;
+    std::chrono::seconds capture_after{60};
+    std::chrono::seconds capture_cooldown{std::chrono::hours(1)};
+    double capture_severity{0.75};
 };
 
 struct Client {
@@ -96,6 +110,23 @@ Options parse_options(int argc, char** argv) {
         } else if (argument == "--task-interval" && index + 1 < argc) {
             options.task_interval_seconds =
                 positive_double(argv[++index], "--task-interval");
+        } else if (argument == "--record-dir" && index + 1 < argc) {
+            options.record_dir = argv[++index];
+        } else if (argument == "--keep" && index + 1 < argc) {
+            options.keep = graywatch::parse_duration(argv[++index]);
+        } else if (argument == "--max-size" && index + 1 < argc) {
+            options.max_size = graywatch::parse_size(argv[++index]);
+        } else if (argument == "--capture-request" && index + 1 < argc) {
+            options.capture_request = argv[++index];
+        } else if (argument == "--capture-after" && index + 1 < argc) {
+            options.capture_after = graywatch::parse_duration(argv[++index]);
+        } else if (argument == "--capture-cooldown" && index + 1 < argc) {
+            options.capture_cooldown = graywatch::parse_duration(argv[++index]);
+        } else if (argument == "--capture-severity" && index + 1 < argc) {
+            options.capture_severity = positive_double(argv[++index], "--capture-severity");
+            if (options.capture_severity > 1.0) {
+                throw std::invalid_argument("--capture-severity must be at most 1");
+            }
         } else {
             throw std::invalid_argument("unknown or incomplete option: " +
                                         std::string(argument));
@@ -320,17 +351,65 @@ int main(int argc, char** argv) {
         bound_socket = options.socket_path;
         std::signal(SIGINT, stop);
         std::signal(SIGTERM, stop);
+        std::signal(SIGHUP, hangup);
 
         std::ofstream log;
-        if (options.log_path) {
+        auto open_log = [&] {
+            if (!options.log_path) return;
+            log.close();
+            log.clear();
             log.open(*options.log_path, std::ios::app);
             if (!log) {
                 throw std::runtime_error("cannot open event log: " +
                                          options.log_path->string());
             }
+        };
+        open_log();
+
+        // The recording, the problem log and capture requests (see recorder.hpp).
+        graywatch::Compressor compressor;
+        std::optional<graywatch::EventRecorder> recorder;
+        std::optional<graywatch::ChangeLog> changes;
+        std::optional<graywatch::CaptureTrigger> capture;
+        if (options.record_dir) {
+            recorder.emplace(*options.record_dir, options.keep, options.max_size, compressor);
+            changes.emplace(*options.record_dir, 10ull << 20, 10, compressor);
+            changes->marker("daemon_started", graywatch::current_timestamp_utc());
+        }
+        if (options.capture_request) {
+            std::optional<std::filesystem::path> state;
+            if (options.record_dir) state = *options.record_dir / "capture-last";
+            capture.emplace(*options.capture_request, state, options.capture_severity,
+                            options.capture_after, options.capture_cooldown);
         }
 
         std::vector<Client> clients;
+        auto wall_now = std::chrono::system_clock::now();
+        auto steady_now = std::chrono::steady_clock::now();
+        std::string interval_timestamp;
+        // Every event goes the same way: interval log, recording, problem
+        // log, capture trigger, then the matching subscribers.
+        auto publish = [&](std::string_view resource, const std::string& key,
+                           const std::string& json, double severity) {
+            if (log) log << json << '\n';
+            if (recorder) recorder->write(json, wall_now);
+            if (changes) changes->observe(key, resource, json, steady_now, interval_timestamp);
+            if (capture) {
+                if (const auto request = capture->observe(key, json, steady_now, wall_now,
+                                                          interval_timestamp)) {
+                    std::cerr << "graywatchd: requested a support collection: " << *request
+                              << '\n';
+                    if (changes) changes->marker("capture_requested", interval_timestamp);
+                }
+            }
+            for (auto& client : clients) {
+                if (client.fd >= 0 && wants_event(client, resource, severity) &&
+                    !send_line(client.fd, json)) {
+                    close(client.fd);
+                    client.fd = -1;
+                }
+            }
+        };
         std::optional<std::string> current_event;
         std::vector<std::string> current_io_events;
         std::vector<std::string> current_network_events;
@@ -435,6 +514,11 @@ int main(int argc, char** argv) {
 
             const auto sample_time = std::chrono::steady_clock::now();
             if (sample_time >= next_sample) {
+                if (reopen_log.exchange(false)) open_log();
+                compressor.reap();
+                wall_now = std::chrono::system_clock::now();
+                steady_now = sample_time;
+                interval_timestamp = graywatch::current_timestamp_utc();
                 const auto current = read_available_psi();
                 // PSI is re-evaluated each interval: an interval needs both
                 // endpoints, and a read failure must not be reported as zero.
@@ -475,16 +559,7 @@ int main(int argc, char** argv) {
                     elapsed, psi_available, attribution_available,
                     attribution_elapsed, attribution_age);
                 current_event = graywatch::to_json(event);
-                if (log) {
-                    log << *current_event << '\n' << std::flush;
-                }
-                for (auto& client : clients) {
-                    if (wants_event(client, "cpu", event.severity) &&
-                        !send_line(client.fd, *current_event)) {
-                        close(client.fd);
-                        client.fd = -1;
-                    }
-                }
+                publish("cpu", "cpu", *current_event, event.severity);
                 current_memory_event.reset();
                 if (previous_memory && current_memory) {
                     if (const auto memory = graywatch::calculate_memory_interval(
@@ -502,15 +577,8 @@ int main(int argc, char** argv) {
                             .psi_full_stall_percent = memory_full,
                         };
                         current_memory_event = graywatch::to_json(memory_event);
-                        if (log) log << *current_memory_event << '\n' << std::flush;
-                        for (auto& client : clients) {
-                            if (wants_event(client, "memory",
-                                            memory_event.assessment.severity) &&
-                                !send_line(client.fd, *current_memory_event)) {
-                                close(client.fd);
-                                client.fd = -1;
-                            }
-                        }
+                        publish("memory", "memory", *current_memory_event,
+                                memory_event.assessment.severity);
                     }
                 }
                 const auto [io_some, io_full] = resource_psi(pressure, "io");
@@ -528,15 +596,7 @@ int main(int argc, char** argv) {
                     };
                     auto json = graywatch::to_json(io_event);
                     current_io_events.push_back(json);
-                    if (log) log << json << '\n' << std::flush;
-                    const double severity = io_event.assessment.severity;
-                    for (auto& client : clients) {
-                        if (wants_event(client, "io", severity) &&
-                            !send_line(client.fd, json)) {
-                            close(client.fd);
-                            client.fd = -1;
-                        }
-                    }
+                    publish("io", "io/" + device.name, json, io_event.assessment.severity);
                 }
                 current_network_events.clear();
                 if (const auto tcp = graywatch::calculate_tcp_interval(
@@ -548,20 +608,8 @@ int main(int argc, char** argv) {
                     };
                     auto json = graywatch::to_json(network_event);
                     current_network_events.push_back(json);
-                    if (log) log << json << '\n' << std::flush;
-                    const bool error = tcp->input_errors != 0;
-                    const bool unstable = tcp->retransmitted_segments >= 10 &&
-                                          tcp->retransmit_percent >= 1.0;
-                    const double severity = error ? 0.8 :
-                        (unstable ? std::clamp(tcp->retransmit_percent / 10.0,
-                                               0.4, 1.0) : 0.01);
-                    for (auto& client : clients) {
-                        if (wants_event(client, "network", severity) &&
-                            !send_line(client.fd, json)) {
-                            close(client.fd);
-                            client.fd = -1;
-                        }
-                    }
+                    publish("network", "network/tcp", json,
+                            graywatch::json_number_field(json, "severity"));
                 }
                 for (const auto& port : graywatch::calculate_ib_intervals(
                          previous_ib, current_ib)) {
@@ -577,16 +625,8 @@ int main(int argc, char** argv) {
                     };
                     auto json = graywatch::to_json(network_event);
                     current_network_events.push_back(json);
-                    if (log) log << json << '\n' << std::flush;
-                    const double severity = graywatch::assess_ib_port(
-                        port, network_event.in_use).severity;
-                    for (auto& client : clients) {
-                        if (wants_event(client, "network", severity) &&
-                            !send_line(client.fd, json)) {
-                            close(client.fd);
-                            client.fd = -1;
-                        }
-                    }
+                    publish("network", "network/ib/" + key, json,
+                            graywatch::assess_ib_port(port, network_event.in_use).severity);
                 }
                 // FUSE: requests the daemon of each fuse mount has not answered.
                 current_fuse_events.clear();
@@ -599,15 +639,12 @@ int main(int argc, char** argv) {
                     };
                     auto json = graywatch::to_json(fuse_event);
                     current_fuse_events.push_back(json);
-                    if (log) log << json << '\n' << std::flush;
-                    for (auto& client : clients) {
-                        if (wants_event(client, "fuse", fuse_event.assessment.severity) &&
-                            !send_line(client.fd, json)) {
-                            close(client.fd);
-                            client.fd = -1;
-                        }
-                    }
+                    publish("fuse", "fuse/" + sample.mount.mount_point, json,
+                            fuse_event.assessment.severity);
                 }
+                // One write per interval for the files, not one per event.
+                if (log) log << std::flush;
+                if (recorder) recorder->flush();
                 clients.erase(std::remove_if(clients.begin(), clients.end(),
                                              [](const Client& client) {
                                                  return client.fd < 0;
@@ -630,6 +667,9 @@ int main(int argc, char** argv) {
         for (const auto& client : clients) {
             close(client.fd);
         }
+        if (changes) changes->marker("daemon_stopped", graywatch::current_timestamp_utc());
+        recorder.reset();
+        compressor.wait_all();
         close(listener);
         std::filesystem::remove(options.socket_path);
         return 0;

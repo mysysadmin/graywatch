@@ -55,6 +55,12 @@ install -m 0644 "$root/portable/README.txt" "$stage/README.txt"
 install -m 0644 "$root/LICENSE" "$stage/LICENSE"
 install -m 0644 "$root/THIRD_PARTY_NOTICES" "$stage/THIRD_PARTY_NOTICES"
 install -m 0644 "$root/EBPF.txt" "$stage/EBPF.txt"
+install -m 0755 "$root/portable/install-graywatch.sh" "$stage/install-graywatch.sh"
+mkdir -p "$stage/packaging"
+for file in graywatchd.service.in graywatch-capture.service.in graywatch-capture.path \
+        graywatchd-fuse.conf; do
+    install -m 0644 "$root/packaging/$file" "$stage/packaging/$file"
+done
 mkdir -p "$stage/licenses"
 install -m 0644 "$root/licenses/LGPL-2.1.txt" "$stage/licenses/LGPL-2.1.txt"
 

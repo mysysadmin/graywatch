@@ -1,0 +1,15 @@
+[Unit]
+Description=Graywatch automatic support collection
+Documentation=file://@GRAYWATCH_DOC@
+After=graywatchd.service
+
+[Service]
+Type=oneshot
+Environment=GRAYWATCH_CAPTURE_KEEP=10 GRAYWATCH_CAPTURE_OPTIONS=
+EnvironmentFile=-/etc/default/graywatch
+# The collector moves the request file into its archive first, which re-arms
+# the path unit. graywatchd limits requests to one per hour by default.
+ExecStart=@GRAYWATCH_COLLECTOR@ --trigger /run/graywatch/capture-request --output-dir /var/lib/graywatch/captures --keep ${GRAYWATCH_CAPTURE_KEEP} $GRAYWATCH_CAPTURE_OPTIONS
+TimeoutStartSec=15min
+Nice=10
+IOSchedulingClass=idle

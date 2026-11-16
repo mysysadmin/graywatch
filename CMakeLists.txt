@@ -21,6 +21,7 @@ add_library(graywatch_core
     src/network_stats.cpp
     src/process.cpp
     src/psi.cpp
+    src/recorder.cpp
     src/report.cpp
     src/task_stats.cpp
     src/user_lookup.cpp
@@ -68,9 +69,17 @@ set(GRAYWATCH_SYSTEMD_UNIT_DIR "lib/systemd/system"
     CACHE PATH "systemd system unit installation directory")
 set(GRAYWATCH_SYSUSERS_DIR "lib/sysusers.d"
     CACHE PATH "systemd-sysusers configuration directory")
+set(GRAYWATCH_DAEMON "${CMAKE_INSTALL_FULL_SBINDIR}/graywatchd")
+set(GRAYWATCH_COLLECTOR "${CMAKE_INSTALL_FULL_BINDIR}/graywatch-collect")
+set(GRAYWATCH_DOC "${CMAKE_INSTALL_FULL_DOCDIR}/README.md")
 configure_file(packaging/graywatchd.service.in graywatchd.service @ONLY)
+configure_file(packaging/graywatch-capture.service.in graywatch-capture.service @ONLY)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/graywatchd.service"
+    "${CMAKE_CURRENT_BINARY_DIR}/graywatch-capture.service"
+    packaging/graywatch-capture.path
     DESTINATION "${GRAYWATCH_SYSTEMD_UNIT_DIR}")
+install(PROGRAMS tools/collect-graywatch-support.sh
+    DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME graywatch-collect)
 install(FILES packaging/graywatch.conf
     DESTINATION "${GRAYWATCH_SYSUSERS_DIR}")
 install(FILES README.md LICENSE THIRD_PARTY_NOTICES EBPF.txt licenses/LGPL-2.1.txt packaging/graywatchd-fuse.conf
@@ -132,6 +141,11 @@ if(BUILD_TESTING)
     target_link_libraries(report_test PRIVATE graywatch_core)
     target_compile_options(report_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME support_report COMMAND report_test)
+
+    add_executable(recorder_test tests/recorder_test.cpp)
+    target_link_libraries(recorder_test PRIVATE graywatch_core)
+    target_compile_options(recorder_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME recorder COMMAND recorder_test)
 
     add_executable(user_lookup_test tests/user_lookup_test.cpp)
     target_link_libraries(user_lookup_test PRIVATE graywatch_core)

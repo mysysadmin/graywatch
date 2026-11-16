@@ -473,6 +473,7 @@ class Analysis {
         annotate_fuse_stalls();
         check_kernel_log();
         correlate();
+        check_history();
         // Within a severity, hung requests (nothing is answering) come before
         // degraded performance (things are slow but still moving).
         const auto hung = [](const Finding& finding) {
@@ -1769,6 +1770,203 @@ class Analysis {
     }
 
     // -- kernel log ----------------------------------------------------------
+
+    // -- history from a running graywatchd service ---------------------------
+
+    static std::string span_text(double seconds) {
+        if (seconds < 120) return format("%.0f s", seconds);
+        if (seconds < 7200) return format("%.0f min", seconds / 60);
+        if (seconds < 172800) return format("%.1f h", seconds / 3600);
+        return format("%.1f days", seconds / 86400);
+    }
+
+    // trigger.json (why an automatic collection ran), changes.jsonl (problem
+    // periods the service logged) and history-events.jsonl (its recording of
+    // the minutes before this collection).
+    void check_history() {
+        if (files_.contains("trigger.json")) {
+            std::size_t invalid{};
+            const auto lines = parse_lines(file("trigger.json"), invalid);
+            if (!lines.empty()) {
+                const auto& trigger = lines.front();
+                report_.conclusions.insert(
+                    report_.conclusions.begin(),
+                    format("Automatic collection: graywatchd asked for it at %s UTC because %s "
+                           "was \"%s\" (severity %.2f) for %.0f s.",
+                           clock_of(trigger.string("timestamp")).c_str(),
+                           trigger.string("key").c_str(), trigger.string("condition").c_str(),
+                           trigger.number("severity", 0.0),
+                           trigger.number("sustained_seconds", 0.0)));
+            }
+        }
+        if (files_.contains("history-events.jsonl")) {
+            const std::string& text = file("history-events.jsonl");
+            const auto first = text.substr(0, text.find('\n'));
+            const auto trimmed = text.substr(0, text.find_last_not_of('\n') + 1);
+            const auto last = trimmed.substr(trimmed.rfind('\n') == std::string::npos
+                                                 ? 0 : trimmed.rfind('\n') + 1);
+            const auto field = [](const std::string& line) {
+                const auto start = line.find("\"timestamp\":\"");
+                return start == std::string::npos ? std::string()
+                                                  : line.substr(start + 13, 24);
+            };
+            const auto from = parse_utc(field(first));
+            const auto to = parse_utc(field(last));
+            if (from && to) {
+                report_.coverage.push_back(format(
+                    "history-events.jsonl: %s of events recorded by the graywatchd service "
+                    "before the collection (%s to %s UTC).", span_text(*to - *from).c_str(),
+                    clock_of(field(first)).c_str(), clock_of(field(last)).c_str()));
+            }
+        }
+        if (!files_.contains("changes.jsonl")) return;
+
+        std::size_t invalid{};
+        const auto lines = parse_lines(file("changes.jsonl"), invalid);
+        const double now = window_start_.value_or(0.0);
+        const double since = now > 0.0 ? now - 24 * 3600.0 : 0.0;
+        struct Period {
+            std::string key;
+            std::string began;
+            double start{};
+            double seconds{};
+            std::string condition;
+            double severity{};
+            bool ongoing{};
+        };
+        std::vector<Period> periods;
+        std::map<std::string, std::size_t> open;  // key -> index in periods
+        std::size_t restarts{};
+        std::size_t captures{};
+        for (const auto& line : lines) {
+            const auto& change = line.string("change");
+            const auto when = parse_utc(line.string("timestamp")).value_or(0.0);
+            if (change == "daemon_started" || change == "daemon_stopped") {
+                // Problems still open when the daemon stopped end there.
+                for (const auto& [key, index] : open) {
+                    periods[index].ongoing = false;
+                    periods[index].seconds = std::max(0.0, when - periods[index].start);
+                }
+                open.clear();
+                if (change == "daemon_started" && when >= since) ++restarts;
+                continue;
+            }
+            if (change == "capture_requested") {
+                if (when >= since) ++captures;
+                continue;
+            }
+            const auto& key = line.string("key");
+            if (change == "began") {
+                open[key] = periods.size();
+                periods.push_back({key, line.string("timestamp"), when, 0.0,
+                                   line.string("condition"), line.number("severity", 0.0), true});
+            } else if (change == "ended") {
+                const auto found = open.find(key);
+                if (found == open.end()) {
+                    const double start = parse_utc(line.string("began")).value_or(when);
+                    periods.push_back({key, line.string("began"), start,
+                                       line.number("duration_seconds", 0.0),
+                                       line.string("worst_condition"),
+                                       line.number("worst_severity", 0.0), false});
+                } else {
+                    auto& period = periods[found->second];
+                    period.ongoing = false;
+                    period.seconds = line.number("duration_seconds", when - period.start);
+                    period.condition = line.string("worst_condition");
+                    period.severity = line.number("worst_severity", period.severity);
+                    open.erase(found);
+                }
+            }
+        }
+        for (auto& period : periods) {
+            if (period.ongoing && now > 0.0) period.seconds = std::max(0.0, now - period.start);
+        }
+        // Problems that overlapped the last 24 hours before the collection.
+        std::erase_if(periods, [&](const Period& period) {
+            return period.start + period.seconds < since || (now > 0.0 && period.start > now);
+        });
+        if (periods.empty() && restarts == 0 && captures == 0) {
+            report_.coverage.push_back("changes.jsonl: the graywatchd service logged no problem "
+                                       "periods in the 24 h before the collection.");
+            return;
+        }
+
+        // Devices are summarized per resource: 70 disk lines say less than one.
+        std::vector<std::string> details;
+        std::map<std::string, std::vector<const Period*>> by_resource;
+        for (const auto& period : periods) {
+            by_resource[period.key.substr(0, period.key.find('/'))].push_back(&period);
+        }
+        const double earliest_ongoing = [&] {
+            double value = 0.0;
+            for (const auto& period : periods) {
+                if (period.ongoing && (value == 0.0 || period.start < value)) value = period.start;
+            }
+            return value;
+        }();
+        for (const auto& [resource, list] : by_resource) {
+            std::set<std::string> keys;
+            std::size_t ongoing{};
+            const Period* first = list.front();
+            const Period* worst = list.front();
+            for (const auto* period : list) {
+                keys.insert(period->key);
+                ongoing += period->ongoing;
+                if (period->start < first->start) first = period;
+                if (period->severity > worst->severity) worst = period;
+            }
+            const auto name = [](const Period* period) {
+                const auto slash = period->key.find('/');
+                return slash == std::string::npos ? period->key : period->key.substr(slash + 1);
+            };
+            if (keys.size() > 3) {
+                details.push_back(format(
+                    "%s: %zu problem periods on %zu %s, the first from %s UTC (%s %s); worst %s "
+                    "%s (%.2f); %zu still ongoing at the collection.",
+                    resource.c_str(), list.size(), keys.size(),
+                    resource == "io" ? "devices" : "keys", clock_of(first->began).c_str(),
+                    name(first).c_str(), first->condition.c_str(), name(worst).c_str(),
+                    worst->condition.c_str(), worst->severity, ongoing));
+                continue;
+            }
+            for (const auto* period : list) {
+                details.push_back(format(
+                    "%s %s from %s UTC for %s%s, worst severity %.2f.", period->key.c_str(),
+                    period->condition.c_str(), clock_of(period->began).c_str(),
+                    span_text(period->seconds).c_str(),
+                    period->ongoing ? " (still ongoing at the collection)" : "",
+                    period->severity));
+            }
+        }
+        if (details.size() > 12) {
+            const auto more = details.size() - 12;
+            details.resize(12);
+            details.push_back(format("... and %zu more lines in changes.jsonl.", more));
+        }
+        if (restarts > 0) {
+            details.push_back(format("graywatchd started %zu time%s.", restarts,
+                                     restarts == 1 ? "" : "s"));
+        }
+        if (captures > 0) {
+            details.push_back(format("%zu automatic collection%s requested.", captures,
+                                     captures == 1 ? "" : "s"));
+        }
+        std::string title =
+            periods.empty()
+                ? std::string("Recorded before the collection: no problem periods in the last 24 h")
+                : format("Recorded before the collection: %zu problem period%s in the last 24 h",
+                         periods.size(), periods.size() == 1 ? "" : "s");
+        if (earliest_ongoing > 0.0 && now > 0.0) {
+            title += format(", ongoing ones since %s before it",
+                            span_text(now - earliest_ongoing).c_str());
+        }
+        add(Severity::info, "history", title, std::move(details),
+            {"The graywatchd service logs a problem period when a resource was non-healthy in at "
+             "least half of 30 intervals, and its end once it was healthy again. "
+             "changes.jsonl in the archive has each period with the event that started it.",
+             "When the problem began long before the collection, look at what changed then: "
+             "deployments, rebuilds, scrubs, new jobs or failing hardware."});
+    }
 
     void check_kernel_log() {
         if (!files_.contains("kernel.log")) {
