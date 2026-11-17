@@ -5,6 +5,7 @@
 #include "graywatch/process.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -515,6 +516,205 @@ class DeviceGroup {
     std::vector<std::string> steps_;
 };
 
+// -- platform snapshots ---------------------------------------------------------
+
+// "KEY VALUE..." lines of platform.txt: kind -> lines split into words.
+std::vector<std::vector<std::string>> platform_lines(const std::string& text,
+                                                     std::string_view kind) {
+    std::vector<std::vector<std::string>> lines;
+    std::istringstream input(text);
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream words(line);
+        std::vector<std::string> fields;
+        std::string word;
+        while (words >> word) fields.push_back(word);
+        if (!fields.empty() && fields.front() == kind) lines.push_back(std::move(fields));
+    }
+    return lines;
+}
+
+// "name=value" fields of one platform.txt line.
+std::map<std::string, std::string> platform_fields(const std::vector<std::string>& fields) {
+    std::map<std::string, std::string> values;
+    for (const auto& field : fields) {
+        const auto equals = field.find('=');
+        if (equals != std::string::npos) values[field.substr(0, equals)] = field.substr(equals + 1);
+    }
+    return values;
+}
+
+// Sections of "== NAME" followed by "key: value" lines (ethtool -S, ethtool,
+// /proc/net/bonding): NAME -> its lines.
+std::map<std::string, std::vector<std::string>> sections(const std::string& text) {
+    std::map<std::string, std::vector<std::string>> result;
+    std::istringstream input(text);
+    std::string line;
+    std::vector<std::string>* current = nullptr;
+    while (std::getline(input, line)) {
+        if (line.starts_with("== ")) {
+            current = &result[line.substr(3)];
+        } else if (current) {
+            current->push_back(line);
+        }
+    }
+    return result;
+}
+
+// ethtool -S counters: "     rx_discards_phy: 12".
+std::map<std::string, double> ethtool_counters(const std::vector<std::string>& lines) {
+    std::map<std::string, double> counters;
+    for (const auto& line : lines) {
+        const auto colon = line.rfind(':');
+        if (colon == std::string::npos) continue;
+        const auto start = line.find_first_not_of(" \t");
+        if (start == std::string::npos || start >= colon) continue;
+        char* end = nullptr;
+        const double value = std::strtod(line.c_str() + colon + 1, &end);
+        if (end == line.c_str() + colon + 1) continue;
+        counters[line.substr(start, colon - start)] = value;
+    }
+    return counters;
+}
+
+// Interface -> "rx.crc_errors" etc. from `ip -s -s -j link`.
+std::map<std::string, std::map<std::string, double>> link_counters(const std::string& text) {
+    std::map<std::string, std::map<std::string, double>> result;
+    if (text.empty()) return result;
+    Value links;
+    try {
+        links = json::parse(text);
+    } catch (const std::exception&) {
+        return result;
+    }
+    for (const auto& link : links.array()) {
+        auto& counters = result[link.string("ifname")];
+        for (const std::string direction : {"rx", "tx"}) {
+            for (const auto& [key, value] : link["stats64"][direction].members()) {
+                counters[direction + "." + key] = value.number(0.0);
+            }
+        }
+    }
+    return result;
+}
+
+// CPU list "0-11,24-35" -> CPU numbers.
+std::set<int> cpu_list(const std::string& text) {
+    std::set<int> cpus;
+    std::istringstream ranges(text);
+    std::string range;
+    while (std::getline(ranges, range, ',')) {
+        const auto dash = range.find('-');
+        const int first = std::atoi(range.c_str());
+        const int last = dash == std::string::npos ? first : std::atoi(range.c_str() + dash + 1);
+        for (int cpu = first; cpu <= last && cpu - first < 4096; ++cpu) cpus.insert(cpu);
+    }
+    return cpus;
+}
+
+// /proc/interrupts: IRQ name (last column, with the IRQ) -> per-CPU counts.
+std::map<std::string, std::vector<double>> interrupt_counts(const std::string& text) {
+    std::map<std::string, std::vector<double>> result;
+    std::istringstream input(text);
+    std::string header;
+    if (!std::getline(input, header)) return result;
+    std::size_t cpus = 0;
+    std::istringstream names(header);
+    std::string name;
+    while (names >> name) cpus += name.starts_with("CPU");
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream fields(line);
+        std::string irq;
+        if (!(fields >> irq) || irq.empty() || !std::isdigit(static_cast<unsigned char>(irq[0]))) {
+            continue;
+        }
+        std::vector<double> counts;
+        std::string field;
+        for (std::size_t cpu = 0; cpu < cpus && fields >> field; ++cpu) {
+            counts.push_back(std::strtod(field.c_str(), nullptr));
+        }
+        std::string rest;
+        std::getline(fields, rest);
+        result[irq + " " + rest] = std::move(counts);
+    }
+    return result;
+}
+
+// /proc/net/softnet_stat: per-CPU packets dropped (column 2) and time
+// squeezes (column 3), in hexadecimal; summed.
+std::pair<double, double> softnet_drops(const std::string& text) {
+    double dropped{}, squeezed{};
+    std::istringstream input(text);
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream fields(line);
+        std::string processed, drop, squeeze;
+        if (!(fields >> processed >> drop >> squeeze)) continue;
+        dropped += static_cast<double>(std::strtoull(drop.c_str(), nullptr, 16));
+        squeezed += static_cast<double>(std::strtoull(squeeze.c_str(), nullptr, 16));
+    }
+    return {dropped, squeezed};
+}
+
+// The "cpu" line of /proc/stat: total jiffies and steal jiffies.
+std::pair<double, double> cpu_steal(const std::string& text) {
+    std::istringstream input(text);
+    std::string label;
+    double total{}, steal{};
+    if (!(input >> label) || label != "cpu") return {0.0, 0.0};
+    for (int column = 0; column < 8; ++column) {
+        double value{};
+        if (!(input >> value)) break;
+        total += value;
+        if (column == 7) steal = value;
+    }
+    return {total, steal};
+}
+
+// Sum of the thermal throttle counters ("PATH COUNT" lines).
+double throttle_total(const std::string& text) {
+    double total{};
+    std::istringstream input(text);
+    std::string path;
+    double count{};
+    while (input >> path >> count) total += count;
+    return total;
+}
+
+// Highest speed in Mb/s among ethtool's "... link modes:" lines, e.g.
+// 25000baseCR/Full -> 25000.
+double highest_mode(const std::vector<std::string>& lines, std::string_view heading) {
+    static const std::regex mode(R"((\d+)base)");
+    double best{};
+    bool inside = false;
+    for (const auto& line : lines) {
+        const auto colon = line.find(':');
+        if (colon != std::string::npos) {
+            const std::string label = line.substr(0, colon);
+            inside = label.find(heading) != std::string::npos;
+        }
+        if (!inside) continue;
+        for (std::sregex_iterator match(line.begin(), line.end(), mode), end; match != end; ++match) {
+            best = std::max(best, std::strtod((*match)[1].str().c_str(), nullptr));
+        }
+    }
+    return best;
+}
+
+std::string ethtool_value(const std::vector<std::string>& lines, std::string_view key) {
+    for (const auto& line : lines) {
+        const auto start = line.find_first_not_of(" \t");
+        if (start == std::string::npos) continue;
+        if (line.compare(start, key.size(), key) == 0 && line.size() > start + key.size() &&
+            line[start + key.size()] == ':') {
+            const auto value = line.find_first_not_of(" \t", start + key.size() + 1);
+            return value == std::string::npos ? "" : line.substr(value);
+        }
+    }
+    return {};
+}
+
 class Analysis {
   public:
     explicit Analysis(const Files& files) : files_(files) {}
@@ -526,6 +726,7 @@ class Analysis {
         check_memory();
         check_io();
         check_network();
+        check_platform();
         check_fuse();
         check_bpf();
         annotate_fuse_stalls();
@@ -2236,6 +2437,411 @@ class Analysis {
         }
     }
 
+    // -- platform ------------------------------------------------------------
+
+    // Pointers at the platform that the support data of the storage software
+    // does not carry: NIC counters and link settings, bonds, packet backlog
+    // drops, interrupt placement, PCIe links, CPU throttling and steal, and
+    // block-layer settings that differ between devices.
+    void check_platform() {
+        const std::string& settings = file("platform.txt");
+        if (settings.empty()) return;
+        const double seconds =
+            std::max(1.0, std::strtod(system("duration_seconds", "1").c_str(), nullptr));
+        check_nics(settings, seconds);
+        check_bonds();
+        check_interrupts(settings, seconds);
+        check_pcie(settings);
+        check_cpu_platform(settings, seconds);
+        check_block_settings(settings);
+    }
+
+    void check_nics(const std::string& settings, double seconds) {
+        std::vector<std::string> nics;
+        std::map<std::string, std::string> mtu;
+        for (const auto& line : platform_lines(settings, "nic")) {
+            if (line.size() < 2) continue;
+            const auto fields = platform_fields(line);
+            nics.push_back(line[1]);
+            const auto state = fields.find("operstate");
+            if (state != fields.end() && state->second == "up") mtu[line[1]] = fields.at("mtu");
+        }
+        const auto before = link_counters(file("links-initial.json"));
+        const auto after = link_counters(file("links-final.json"));
+        const auto stats_before = sections(file("ethtool-stats-initial.txt"));
+        const auto stats_after = sections(file("ethtool-stats-final.txt"));
+        const auto link_settings = sections(file("ethtool-settings.txt"));
+        static const std::regex fault(R"(err|crc|fcs|frame|carrier|abort|timeout|symbol)",
+                                      std::regex::icase);
+        static const std::regex loss(
+            R"(discard|drop|miss|fifo|out_of_buffer|no_buf|nobuf|overrun|over_errors)",
+            std::regex::icase);
+        static const std::regex pause(R"(pause)", std::regex::icase);
+        for (const auto& nic : nics) {
+            // Counter -> increase over the window, from ip and ethtool.
+            std::map<std::string, double> increase;
+            const auto link_before = before.find(nic);
+            const auto link_after = after.find(nic);
+            if (link_before != before.end() && link_after != after.end()) {
+                for (const auto& [key, value] : link_after->second) {
+                    const auto old = link_before->second.find(key);
+                    if (old != link_before->second.end() && value > old->second) {
+                        increase[key] = value - old->second;
+                    }
+                }
+            }
+            const auto ethtool_before = stats_before.find(nic);
+            const auto ethtool_after = stats_after.find(nic);
+            if (ethtool_before != stats_before.end() && ethtool_after != stats_after.end()) {
+                const auto old = ethtool_counters(ethtool_before->second);
+                for (const auto& [key, value] : ethtool_counters(ethtool_after->second)) {
+                    // Per-queue and size-bucket counters repeat the totals.
+                    if (key.find_first_of("0123456789") != std::string::npos) continue;
+                    const auto found = old.find(key);
+                    if (found != old.end() && value > found->second) {
+                        increase[key] = value - found->second;
+                    }
+                }
+            }
+            std::vector<std::pair<std::string, double>> faults, losses, pauses;
+            for (const auto& [key, value] : increase) {
+                if (key.find("bytes") != std::string::npos || key.find("packets") != std::string::npos) {
+                    if (!std::regex_search(key, loss) && !std::regex_search(key, fault)) continue;
+                }
+                if (std::regex_search(key, pause)) pauses.emplace_back(key, value);
+                else if (std::regex_search(key, fault)) faults.emplace_back(key, value);
+                else if (std::regex_search(key, loss)) losses.emplace_back(key, value);
+            }
+            const auto describe = [&](std::vector<std::pair<std::string, double>> counters) {
+                std::stable_sort(counters.begin(), counters.end(),
+                                 [](const auto& a, const auto& b) { return a.second > b.second; });
+                std::vector<std::string> parts;
+                for (std::size_t index = 0; index < counters.size() && index < 6; ++index) {
+                    parts.push_back(format("%s +%.0f (%.1f/s)", counters[index].first.c_str(),
+                                           counters[index].second, counters[index].second / seconds));
+                }
+                return join(parts, ", ");
+            };
+            double lost{};
+            for (const auto& [key, value] : losses) lost = std::max(lost, value);
+            if (!faults.empty() || lost >= 100.0) {
+                std::vector<std::string> details;
+                if (!faults.empty()) details.push_back("Errors: " + describe(faults) + ".");
+                if (!losses.empty()) details.push_back("Drops: " + describe(losses) + ".");
+                add(Severity::warning, "network",
+                    "NIC " + nic + (faults.empty() ? " dropped packets" : " counted errors") +
+                        " during the window",
+                    std::move(details),
+                    {"CRC, frame or symbol errors point at the cable, transceiver or switch "
+                     "port. Receive drops with out_of_buffer, missed or fifo mean the host did not "
+                     "take packets off the ring fast enough: check the ring size (`ethtool -g`), "
+                     "interrupt placement and CPU load. Discards counted by the NIC's physical "
+                     "port (`*_phy`) can also be the switch sending faster than the port drains.",
+                     "Compare with the switch port's counters for the same window."});
+                nic_pointer_ = true;
+            } else if (!losses.empty()) {
+                report_.overview.push_back("NIC " + nic + " drops: " + describe(losses) + ".");
+            }
+            if (!pauses.empty()) {
+                double most{};
+                for (const auto& [key, value] : pauses) most = std::max(most, value);
+                add(most / seconds >= 10.0 ? Severity::warning : Severity::info, "network",
+                    "NIC " + nic + " sent or received pause frames",
+                    {"Flow control: " + describe(pauses) + "."},
+                    {"Received pause frames (rx_*pause*) mean the switch or the peer asked this "
+                     "host to stop sending: congestion further along the path. Sent pause frames "
+                     "(tx_*pause*) mean this NIC could not keep up with what arrived. Either "
+                     "stalls all traffic on the link, not only the busy flow."});
+            }
+            // Link settings: negotiated below what the NIC supports, or half duplex.
+            const auto found = link_settings.find(nic);
+            if (found == link_settings.end()) continue;
+            const auto& lines = found->second;
+            const std::string speed_text = ethtool_value(lines, "Speed");
+            const double speed = std::strtod(speed_text.c_str(), nullptr);
+            const double supported = highest_mode(lines, "Supported link modes");
+            const double partner = highest_mode(lines, "Link partner advertised link modes");
+            if (speed > 0) report_.settings["nic " + nic + " speed"] = speed_text;
+            if (speed > 0 && supported > speed) {
+                add(Severity::warning, "network",
+                    format("NIC %s runs at %.0f Mb/s of %.0f Mb/s supported", nic.c_str(), speed,
+                           supported),
+                    {partner > 0 ? format("The link partner (switch port) advertises up to %.0f "
+                                          "Mb/s.", partner)
+                                 : "The link partner did not report its link modes."},
+                    {"A lower negotiated speed than both ends support points at the cable or "
+                     "transceiver; a partner advertising less points at the switch port's "
+                     "configuration. Intended if the network was built for this speed."});
+                nic_pointer_ = true;
+            }
+            if (ethtool_value(lines, "Duplex") == "Half") {
+                add(Severity::warning, "network", "NIC " + nic + " runs at half duplex",
+                    {"Half duplex on a switched network is almost always a failed "
+                     "auto-negotiation."},
+                    {"Check auto-negotiation on both ends and the cable."});
+                nic_pointer_ = true;
+            }
+        }
+        std::set<std::string> mtus;
+        std::vector<std::string> mtu_text;
+        for (const auto& [nic, value] : mtu) {
+            mtus.insert(value);
+            mtu_text.push_back(nic + "=" + value);
+            report_.settings["nic " + nic + " mtu"] = value;
+        }
+        if (mtus.size() > 1) {
+            add(Severity::info, "network", "NICs use different MTUs",
+                {"MTU per interface: " + join(mtu_text, ", ") + "."},
+                {"Fine for separate networks. On one path every hop (both hosts and the switch "
+                 "ports) needs the same MTU; a mismatch shows as stalls on large transfers while "
+                 "small requests work. The cluster summary compares MTUs between hosts."});
+        }
+        const auto [drops_before, squeeze_before] = softnet_drops(file("softnet-initial.txt"));
+        const auto [drops_after, squeeze_after] = softnet_drops(file("softnet-final.txt"));
+        if (drops_after > drops_before) {
+            add(Severity::warning, "network", "Packets dropped in the kernel's receive backlog",
+                {format("%.0f packets were dropped because a CPU's backlog queue was full "
+                        "(/proc/net/softnet_stat); %.0f times packet processing ran out of "
+                        "budget.", drops_after - drops_before, squeeze_after - squeeze_before)},
+                {"Raise net.core.netdev_max_backlog, and spread the NIC's interrupts and receive "
+                 "queues over more CPUs (RSS, irqbalance)."});
+            nic_pointer_ = true;
+        }
+        for (const auto& line : platform_lines(settings, "sysctl")) {
+            if (line.size() >= 3) report_.settings[line[1]] = line[2];
+        }
+        const double tracked =
+            std::strtod(report_.settings["net.netfilter.nf_conntrack_count"].c_str(), nullptr);
+        const double limit =
+            std::strtod(report_.settings["net.netfilter.nf_conntrack_max"].c_str(), nullptr);
+        report_.settings.erase("net.netfilter.nf_conntrack_count");
+        if (limit > 0 && tracked >= 0.9 * limit) {
+            add(Severity::warning, "network", "Connection tracking table nearly full",
+                {format("%.0f of %.0f entries in use.", tracked, limit)},
+                {"When it fills, new connections are dropped. Raise "
+                 "net.netfilter.nf_conntrack_max or exempt storage traffic from tracking."});
+        }
+    }
+
+    void check_bonds() {
+        for (const auto& [bond, lines] : sections(file("bonding.txt"))) {
+            std::string member;
+            std::vector<std::string> down;
+            std::vector<std::string> failures;
+            for (const auto& line : lines) {
+                if (line.starts_with("Slave Interface:")) {
+                    member = line.substr(line.find(':') + 2);
+                } else if (!member.empty() && line.starts_with("MII Status:") &&
+                           line.find("down") != std::string::npos) {
+                    down.push_back(member);
+                } else if (!member.empty() && line.starts_with("Link Failure Count:")) {
+                    const auto count = line.substr(line.find(':') + 2);
+                    if (count != "0") failures.push_back(member + "=" + count);
+                }
+            }
+            if (!down.empty()) {
+                add(Severity::warning, "network",
+                    "Bond " + bond + " has members down: " + join(down, ", "),
+                    {"The bond carries all traffic on its remaining members."},
+                    {"Check the member's cable, transceiver and switch port."});
+                nic_pointer_ = true;
+            } else if (!failures.empty()) {
+                report_.overview.push_back("Bond " + bond + " link failures since boot: " +
+                                           join(failures, ", ") + ".");
+            }
+        }
+    }
+
+    // Interrupts of each NIC (matched by interface name or PCI address) per
+    // CPU over the window: all on one CPU, or on another NUMA node than the NIC.
+    void check_interrupts(const std::string& settings, double seconds) {
+        const auto before = interrupt_counts(file("interrupts-initial.txt"));
+        const auto after = interrupt_counts(file("interrupts-final.txt"));
+        if (before.empty() || after.empty()) return;
+        std::map<int, int> node_of;
+        for (const auto& line : platform_lines(settings, "numa")) {
+            if (line.size() < 3) continue;
+            const int node = std::atoi(line[1].c_str());
+            for (const int cpu : cpu_list(platform_fields(line)["cpus"])) node_of[cpu] = node;
+        }
+        std::map<std::string, std::pair<std::string, int>> pci_of;  // nic -> (address, node)
+        for (const auto& line : platform_lines(settings, "pci")) {
+            if (line.size() < 3) continue;
+            pci_of[line[2]] = {line[1], std::atoi(platform_fields(line)["numa_node"].c_str())};
+        }
+        for (const auto& line : platform_lines(settings, "nic")) {
+            if (line.size() < 2) continue;
+            const std::string& nic = line[1];
+            const auto pci = pci_of.find(nic);
+            std::vector<double> per_cpu;
+            for (const auto& [name, counts] : after) {
+                const bool mine = name.find(nic) != std::string::npos ||
+                                  (pci != pci_of.end() &&
+                                   name.find(pci->second.first) != std::string::npos);
+                const auto old = before.find(name);
+                if (!mine || old == before.end()) continue;
+                if (per_cpu.size() < counts.size()) per_cpu.resize(counts.size());
+                for (std::size_t cpu = 0; cpu < counts.size() && cpu < old->second.size(); ++cpu) {
+                    per_cpu[cpu] += std::max(0.0, counts[cpu] - old->second[cpu]);
+                }
+            }
+            double total{};
+            for (const double count : per_cpu) total += count;
+            if (per_cpu.size() < 4 || total / seconds < 1000.0) continue;
+            const auto busiest = std::max_element(per_cpu.begin(), per_cpu.end());
+            const auto cpu = static_cast<int>(busiest - per_cpu.begin());
+            if (*busiest >= 0.5 * total) {
+                add(Severity::warning, "network",
+                    format("Interrupts of NIC %s concentrated on CPU %d", nic.c_str(), cpu),
+                    {format("CPU %d handled %.0f%% of %.0f interrupts per second.", cpu,
+                            100.0 * *busiest / total, total / seconds)},
+                    {"One CPU processing all of a NIC's interrupts caps its throughput and "
+                     "drops packets under load. Check that irqbalance runs or that the queues' "
+                     "smp_affinity spreads them, and the queue count (`ethtool -l`)."});
+                nic_pointer_ = true;
+            }
+            if (pci == pci_of.end() || pci->second.second < 0 || node_of.empty()) continue;
+            double remote{};
+            for (std::size_t index = 0; index < per_cpu.size(); ++index) {
+                const auto node = node_of.find(static_cast<int>(index));
+                if (node != node_of.end() && node->second != pci->second.second) {
+                    remote += per_cpu[index];
+                }
+            }
+            if (remote >= 0.5 * total) {
+                add(Severity::info, "network",
+                    format("NIC %s interrupts are handled on another NUMA node", nic.c_str()),
+                    {format("The NIC is attached to NUMA node %d; %.0f%% of its interrupts ran on "
+                            "CPUs of other nodes.", pci->second.second, 100.0 * remote / total)},
+                    {"Every packet then crosses the inter-socket link. Pin the NIC's interrupts "
+                     "(and ideally the service using it) to CPUs of its own node."});
+            }
+        }
+    }
+
+    void check_pcie(const std::string& settings) {
+        std::vector<std::string> narrow;
+        std::vector<std::string> slow;
+        for (const auto& line : platform_lines(settings, "pci")) {
+            if (line.size() < 3) continue;
+            auto fields = platform_fields(line);
+            const std::string device = line[2] + " (" + line[1] + ", " + fields["driver"] + ")";
+            const int width = std::atoi(fields["current_width"].c_str());
+            const int max_width = std::atoi(fields["max_width"].c_str());
+            const double speed = std::strtod(fields["current_speed"].c_str(), nullptr);
+            const double max_speed = std::strtod(fields["max_speed"].c_str(), nullptr);
+            if (width > 0 && max_width > width) {
+                narrow.push_back(format("%s: x%d of x%d", device.c_str(), width, max_width));
+            }
+            if (speed > 0 && max_speed > speed) {
+                slow.push_back(format("%s: %.1f of %.1f GT/s", device.c_str(), speed, max_speed));
+            }
+        }
+        if (!narrow.empty()) {
+            add(Severity::warning, "platform", "PCIe links narrower than the devices support",
+                narrow,
+                {"A link trained to fewer lanes than the card has caps its bandwidth. Usually "
+                 "the slot (wired for fewer lanes), a riser, or a card not fully seated; check "
+                 "`lspci -vv` LnkCap against LnkSta and the board's slot documentation."});
+        }
+        if (!slow.empty()) {
+            add(Severity::info, "platform", "PCIe links slower than the devices support", slow,
+                {"Some devices lower the link speed when idle to save power; a link that stays "
+                 "slow under load points at the slot, a riser or the BIOS PCIe generation "
+                 "setting."});
+        }
+    }
+
+    void check_cpu_platform(const std::string& settings, double seconds) {
+        const double throttled = throttle_total(file("throttle-final.txt")) -
+                                 throttle_total(file("throttle-initial.txt"));
+        if (throttled > 0) {
+            add(Severity::warning, "platform", "CPUs were thermally throttled",
+                {format("%.0f thermal throttling events in %.0f s.", throttled, seconds)},
+                {"The CPUs ran slower than their rated speed because of temperature or power "
+                 "limits. Check fans, airflow, the BIOS power profile and the BMC's sensor "
+                 "log."});
+        }
+        const auto [total_before, steal_before] = cpu_steal(file("stat-initial.txt"));
+        const auto [total_after, steal_after] = cpu_steal(file("stat-final.txt"));
+        const double total = total_after - total_before;
+        if (total > 0) {
+            const double steal = 100.0 * (steal_after - steal_before) / total;
+            if (steal >= 5.0) {
+                add(Severity::warning, "platform",
+                    format("The hypervisor took %.0f%% of the CPU time (steal)", steal),
+                    {"Steal is time the virtual CPUs were runnable but the host ran something "
+                     "else."},
+                    {"The virtual machine's host is overcommitted: ask its operator for CPU "
+                     "reservations or move the VM."});
+            }
+        }
+        for (const auto& line : platform_lines(settings, "cpufreq")) {
+            auto fields = platform_fields(line);
+            report_.settings["cpufreq governor"] = fields["governor"];
+            if (fields["governor"] == "powersave" && fields["driver"] != "intel_pstate" &&
+                fields["driver"] != "amd-pstate-epp") {
+                add(Severity::info, "platform", "CPU frequency governor is powersave",
+                    {"Driver " + fields["driver"] + " with the powersave governor keeps the "
+                     "CPUs at their lowest frequency."},
+                    {"Use the performance or schedutil governor on servers."});
+            }
+        }
+    }
+
+    // Block-layer settings that differ from the other devices of the same kind
+    // (hard disk or solid state) on this host.
+    void check_block_settings(const std::string& settings) {
+        static const std::vector<std::string> keys{"scheduler", "wbt_lat_usec", "nr_requests",
+                                                   "read_ahead_kb", "max_sectors_kb",
+                                                   "write_cache"};
+        std::map<std::string, std::vector<std::map<std::string, std::string>>> by_kind;
+        for (const auto& line : platform_lines(settings, "block")) {
+            if (line.size() < 2) continue;
+            auto fields = platform_fields(line);
+            // Partitions and stacked devices follow their disks.
+            const auto found = topology_.find(line[1]);
+            if (found != topology_.end() && found->second.type != "disk") continue;
+            fields["name"] = line[1];
+            by_kind[fields["rotational"] == "1" ? "hard disk" : "solid state"].push_back(
+                std::move(fields));
+        }
+        const auto field = [](const std::map<std::string, std::string>& values,
+                              const std::string& key) {
+            const auto found = values.find(key);
+            return found == values.end() ? std::string("?") : found->second;
+        };
+        std::vector<std::string> odd;
+        for (const auto& [kind, devices] : by_kind) {
+            for (const auto& key : keys) {
+                std::map<std::string, std::size_t> votes;
+                for (const auto& device : devices) ++votes[field(device, key)];
+                const auto common = std::max_element(
+                    votes.begin(), votes.end(),
+                    [](const auto& a, const auto& b) { return a.second < b.second; });
+                report_.settings[kind + " " + key] =
+                    votes.size() == 1 ? common->first : common->first + " (most)";
+                if (votes.size() == 1 || devices.size() < 3) continue;
+                std::vector<std::string> names;
+                for (const auto& device : devices) {
+                    if (field(device, key) != common->first) {
+                        names.push_back(field(device, "name") + "=" + field(device, key));
+                    }
+                }
+                odd.push_back(format("%s %s: %zu use %s; ", kind.c_str(), key.c_str(),
+                                     common->second, common->first.c_str()) +
+                              join(names, ", ") + ".");
+            }
+        }
+        if (!odd.empty()) {
+            add(Severity::info, "platform", "Block devices of the same kind are set up differently",
+                std::move(odd),
+                {"Usually leftovers of manual tuning or of a replaced disk. The scheduler, "
+                 "writeback throttling (wbt_lat_usec) and the disk's write cache change latency "
+                 "under load; a disk set up unlike its peers behaves unlike them."});
+        }
+    }
+
     // -- correlation -------------------------------------------------------
 
     void correlate() {
@@ -2258,6 +2864,7 @@ class Analysis {
             if (!retransmit_peer_.empty()) {
                 platform.push_back("TCP retransmits concentrated on " + retransmit_peer_);
             }
+            if (nic_pointer_) platform.push_back("a NIC showed errors, drops or a degraded link");
             if (memory_significant) platform.push_back("memory was under pressure");
             if (psi_cpu_) platform.push_back("CPUs were contended");
             if (platform.empty()) {
@@ -2343,6 +2950,7 @@ class Analysis {
     std::string fuse_stuck_from_fusectl_;  // mount whose fusectl stall set fuse_stuck_
     std::string retransmit_peer_;          // peer taking most TCP retransmits, if one does
     bool reassessed_io_{};                 // io events judged again with lsblk's device type
+    bool nic_pointer_{};                   // NIC errors, drops, link or interrupt problems
     bool psi_cpu_{};
     bool network_bad_{};
     bool network_load_{};      // congestion or retransmits, no errors
@@ -2443,6 +3051,14 @@ std::string render(const Report& report, Format format_kind) {
         strings(report.overview);
         output << ",\"device_overview\":";
         strings(report.device_overview);
+        output << ",\"settings\":{";
+        bool first_setting = true;
+        for (const auto& [key, value] : report.settings) {
+            output << (first_setting ? "" : ",") << '"' << json::escape(key) << "\":\""
+                   << json::escape(value) << '"';
+            first_setting = false;
+        }
+        output << '}';
         output << ",\"coverage\":";
         strings(report.coverage);
         output << "}\n";
@@ -2661,6 +3277,26 @@ std::string render_cluster(const std::vector<Report>& reports) {
                       join(shared->hosts, ", ");
         out << "* [" << level(shared->severity) << "] " << title << " (" << where << ")\n";
     }
+    // Platform settings that are not the same on every host that reports them.
+    std::map<std::string, std::map<std::string, std::vector<std::string>>> values;
+    for (std::size_t index = 0; index < reports.size(); ++index) {
+        for (const auto& [key, value] : reports[index].settings) {
+            values[key][value].push_back(hosts[index]);
+        }
+    }
+    std::vector<std::string> differing;
+    for (const auto& [key, by_value] : values) {
+        // Per-interface settings are compared only where interface names match.
+        if (by_value.size() < 2) continue;
+        std::vector<std::string> parts;
+        for (const auto& [value, where] : by_value) {
+            parts.push_back(value + " on " + join(where, ", "));
+        }
+        differing.push_back(key + ": " + join(parts, "; "));
+    }
+    out << "\nSettings that differ between hosts\n----------------------------------\n\n";
+    if (differing.empty()) out << "None.\n";
+    for (const auto& line : differing) out << "* " << line << '\n';
     out << "\nPer host\n--------\n\n";
     for (const auto& host : hosts) {
         auto found = own.find(host);

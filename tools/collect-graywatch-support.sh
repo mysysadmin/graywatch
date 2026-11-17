@@ -250,6 +250,113 @@ if [ "$ready" -ne 1 ]; then
     exit 1
 fi
 
+# Network interfaces backed by hardware (a PCI or other bus device), not
+# loopback, bridges, VLANs or bonds.
+physical_nics() {
+    for path in /sys/class/net/*; do
+        if [ -e "$path/device" ]; then echo "${path##*/}"; fi
+    done
+}
+
+# Counters that only mean something as a change over the window: NIC
+# statistics, per-CPU packet backlog drops, interrupts, CPU time (steal) and
+# thermal throttling.
+platform_counters() {
+    ip -s -s -j link > "$work/links-$1.json" 2>/dev/null ||
+        note_error "ip -j link unavailable"
+    if command -v ethtool >/dev/null 2>&1; then
+        for nic in $(physical_nics); do
+            echo "== $nic"
+            ethtool -S "$nic" 2>/dev/null || true
+        done > "$work/ethtool-stats-$1.txt"
+    fi
+    cp /proc/net/softnet_stat "$work/softnet-$1.txt" 2>/dev/null || true
+    cp /proc/interrupts "$work/interrupts-$1.txt" 2>/dev/null || true
+    cp /proc/stat "$work/stat-$1.txt" 2>/dev/null || true
+    for counter in /sys/devices/system/cpu/cpu[0-9]*/thermal_throttle/*_throttle_count; do
+        if [ -r "$counter" ]; then echo "$counter $(cat "$counter")"; fi
+    done > "$work/throttle-$1.txt" 2>/dev/null
+    [ -s "$work/throttle-$1.txt" ] || rm -f "$work/throttle-$1.txt"
+}
+
+# How the platform is set up: NIC link settings, bonds, PCIe links of NICs
+# and storage controllers, NUMA, and the block-layer settings that shape
+# latency. Each line is KEY VALUE... so the report can compare devices.
+platform_settings() {
+    if command -v ethtool >/dev/null 2>&1; then
+        for nic in $(physical_nics); do
+            echo "== $nic"
+            ethtool "$nic" 2>/dev/null || true
+        done > "$work/ethtool-settings.txt"
+    else
+        note_error "ethtool not installed: no NIC counters or link settings"
+    fi
+    for bond in /proc/net/bonding/*; do
+        [ -r "$bond" ] || continue
+        echo "== ${bond##*/}"
+        cat "$bond"
+    done > "$work/bonding.txt" 2>/dev/null
+    [ -s "$work/bonding.txt" ] || rm -f "$work/bonding.txt"
+    {
+        for path in /sys/class/net/*/device /sys/class/scsi_host/*/device \
+                    /sys/class/nvme/*/device; do
+            [ -e "$path" ] || continue
+            pci=$(readlink -f "$path")
+            # A SCSI host's device is the controller's PCI function's child.
+            while [ -n "$pci" ] && [ "$pci" != / ] && [ ! -e "$pci/current_link_speed" ]; do
+                pci=${pci%/*}
+            done
+            [ -e "$pci/current_link_speed" ] || continue
+            owner=${path%/device}
+            echo "pci ${pci##*/} ${owner##*/} driver=$(basename "$(readlink -f "$pci/driver" 2>/dev/null)" 2>/dev/null)" \
+                "current_speed=$(tr ' ' '_' < "$pci/current_link_speed" 2>/dev/null)" \
+                "max_speed=$(tr ' ' '_' < "$pci/max_link_speed" 2>/dev/null)" \
+                "current_width=$(cat "$pci/current_link_width" 2>/dev/null)" \
+                "max_width=$(cat "$pci/max_link_width" 2>/dev/null)" \
+                "numa_node=$(cat "$pci/numa_node" 2>/dev/null)"
+        done | awk '!seen[$2]++'  # one line per PCI function (a controller has many hosts)
+        for nic in $(physical_nics); do
+            master=""
+            if [ -e "/sys/class/net/$nic/master" ]; then
+                master=$(basename "$(readlink -f "/sys/class/net/$nic/master")")
+            fi
+            echo "nic $nic mtu=$(cat "/sys/class/net/$nic/mtu" 2>/dev/null)" \
+                "operstate=$(cat "/sys/class/net/$nic/operstate" 2>/dev/null)" \
+                "master=$master"
+        done
+        for node in /sys/devices/system/node/node[0-9]*; do
+            if [ -r "$node/cpulist" ]; then
+                echo "numa ${node##*node} cpus=$(cat "$node/cpulist")"
+            fi
+        done
+        for queue in /sys/block/*/queue; do
+            device=${queue%/queue}
+            device=${device##*/}
+            case "$device" in loop*|ram*|zram*) continue ;; esac
+            scheduler=$(sed -n 's/.*\[\(.*\)\].*/\1/p' "$queue/scheduler" 2>/dev/null)
+            echo "block $device rotational=$(cat "$queue/rotational" 2>/dev/null)" \
+                "scheduler=${scheduler:-none}" \
+                "wbt_lat_usec=$(cat "$queue/wbt_lat_usec" 2>/dev/null)" \
+                "nr_requests=$(cat "$queue/nr_requests" 2>/dev/null)" \
+                "read_ahead_kb=$(cat "$queue/read_ahead_kb" 2>/dev/null)" \
+                "max_sectors_kb=$(cat "$queue/max_sectors_kb" 2>/dev/null)" \
+                "write_cache=$(tr ' ' '_' < "$queue/write_cache" 2>/dev/null)"
+        done
+        for key in vm.dirty_ratio vm.dirty_background_ratio vm.dirty_bytes \
+                   vm.dirty_background_bytes vm.swappiness vm.zone_reclaim_mode \
+                   net.netfilter.nf_conntrack_max net.netfilter.nf_conntrack_count \
+                   net.core.netdev_max_backlog; do
+            if value=$(sysctl -n "$key" 2>/dev/null); then echo "sysctl $key $value"; fi
+        done
+        for cpu in /sys/devices/system/cpu/cpu0/cpufreq; do
+            [ -d "$cpu" ] || continue
+            echo "cpufreq driver=$(cat "$cpu/scaling_driver" 2>/dev/null)" \
+                "governor=$(cat "$cpu/scaling_governor" 2>/dev/null)" \
+                "max_khz=$(cat "$cpu/cpuinfo_max_freq" 2>/dev/null)"
+        done
+    } > "$work/platform.txt" 2>/dev/null
+}
+
 snapshot() {
     for resource in cpu io memory network fuse; do
         "$client" status --socket "$socket" --resource "$resource" \
@@ -258,6 +365,7 @@ snapshot() {
     done
     cp /proc/meminfo "$work/meminfo-$1.txt" 2>/dev/null || true
     cp /proc/vmstat "$work/vmstat-$1.txt" 2>/dev/null || true
+    platform_counters "$1"
 }
 
 # The eBPF helper needs root and kernel BTF. It stops by itself after the
@@ -276,6 +384,7 @@ if [ "$bpf" -eq 1 ]; then
     fi
 fi
 
+platform_settings
 sleep 2
 snapshot initial
 echo "Collecting for ${duration}s; press Ctrl-C to abort." >&2

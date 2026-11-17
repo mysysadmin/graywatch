@@ -562,9 +562,14 @@ void test_cluster() {
     };
     const Finding peer{Severity::warning, "network", "TCP retransmits concentrated on 10.0.0.26",
                        {}, {}};
-    const auto text = graywatch::report::render_cluster(
-        {host("fs1", {peer, {Severity::warning, "io", "Block device sdl: saturated", {}, {}}}),
-         host("fs2", {peer, {Severity::info, "cpu", "Threads in D state", {}, {}}})});
+    auto fs1 = host("fs1", {peer, {Severity::warning, "io", "Block device sdl: saturated", {}, {}}});
+    auto fs2 = host("fs2", {peer, {Severity::info, "cpu", "Threads in D state", {}, {}}});
+    fs1.settings = {{"nic ib0 mtu", "4092"}, {"hard disk scheduler", "mq-deadline"}};
+    fs2.settings = {{"nic ib0 mtu", "2044"}, {"hard disk scheduler", "mq-deadline"}};
+    const auto text = graywatch::report::render_cluster({fs1, fs2});
+    require(text.find("* nic ib0 mtu: 2044 on fs2; 4092 on fs1") != std::string::npos &&
+                text.find("hard disk scheduler:") == std::string::npos,
+            "settings that differ between hosts");
     require(text.find("[WARNING] TCP retransmits concentrated on 10.0.0.26 (all hosts)") !=
                 std::string::npos,
             "shared finding listed once");
@@ -573,6 +578,85 @@ void test_cluster() {
     require(text.find("fs2: nothing beyond the shared findings") != std::string::npos &&
                 text.find("Threads in D state") == std::string::npos,
             "info findings left out");
+}
+
+// Platform pointers from the collector's snapshots before and after the window.
+void test_platform() {
+    auto files = bundle(false);
+    files["platform.txt"] =
+        "pci 0000:05:00.0 ens1f0 driver=mlx5_core current_speed=16.0_GT/s_PCIe "
+        "max_speed=16.0_GT/s_PCIe current_width=8 max_width=16 numa_node=0\n"
+        "nic ens1f0 mtu=9000 operstate=up master=bond0\n"
+        "nic ens1f1 mtu=1500 operstate=up master=bond0\n"
+        "numa 0 cpus=0-3\nnuma 1 cpus=4-7\n"
+        "block sda rotational=1 scheduler=mq-deadline wbt_lat_usec=75000 nr_requests=256 "
+        "read_ahead_kb=128 max_sectors_kb=1280 write_cache=write_back\n"
+        "block sdb rotational=1 scheduler=mq-deadline wbt_lat_usec=75000 nr_requests=256 "
+        "read_ahead_kb=128 max_sectors_kb=1280 write_cache=write_back\n"
+        "block sdc rotational=1 scheduler=none wbt_lat_usec=75000 nr_requests=256 "
+        "read_ahead_kb=128 max_sectors_kb=1280 write_cache=write_back\n"
+        "sysctl net.core.netdev_max_backlog 1000\n";
+    const auto links = [](int crc, int missed) {
+        return R"([{"ifname":"ens1f0","stats64":{"rx":{"bytes":1,"packets":1,"crc_errors":)" +
+               std::to_string(crc) + R"(,"missed_errors":)" + std::to_string(missed) +
+               R"(,"dropped":0},"tx":{"errors":0}}}])";
+    };
+    files["links-initial.json"] = links(0, 0);
+    files["links-final.json"] = links(12, 500);
+    files["ethtool-stats-initial.txt"] =
+        "== ens1f0\nNIC statistics:\n     rx_pause_ctrl_phy: 0\n     rx0_packets: 5\n";
+    files["ethtool-stats-final.txt"] =
+        "== ens1f0\nNIC statistics:\n     rx_pause_ctrl_phy: 40000\n     rx0_packets: 900\n";
+    files["ethtool-settings.txt"] =
+        "== ens1f0\nSettings for ens1f0:\n\tSupported link modes:   10000baseKR/Full\n"
+        "\t                        25000baseCR/Full\n"
+        "\tLink partner advertised link modes:  10000baseKR/Full\n"
+        "\tSpeed: 10000Mb/s\n\tDuplex: Full\n";
+    files["softnet-initial.txt"] = "00000010 00000000 00000001\n";
+    files["softnet-final.txt"] = "00000fff 0000002a 00000009\n";
+    files["interrupts-initial.txt"] =
+        "           CPU0       CPU1       CPU2       CPU3       CPU4       CPU5       CPU6       CPU7\n"
+        " 80:          0          0          0          0          0          0          0          0  "
+        "IR-PCI-MSIX-0000:05:00.0   0-edge      mlx5_comp0@pci:0000:05:00.0\n";
+    files["interrupts-final.txt"] =
+        "           CPU0       CPU1       CPU2       CPU3       CPU4       CPU5       CPU6       CPU7\n"
+        " 80:          0          0          0          0     900000          0          0          0  "
+        "IR-PCI-MSIX-0000:05:00.0   0-edge      mlx5_comp0@pci:0000:05:00.0\n";
+    files["stat-initial.txt"] = "cpu 100 0 100 1000 0 0 0 0 0 0\n";
+    files["stat-final.txt"] = "cpu 200 0 200 1500 0 0 0 120 0 0\n";
+    files["throttle-initial.txt"] =
+        "/sys/devices/system/cpu/cpu0/thermal_throttle/core_throttle_count 3\n";
+    files["throttle-final.txt"] =
+        "/sys/devices/system/cpu/cpu0/thermal_throttle/core_throttle_count 7\n";
+    files["bonding.txt"] =
+        "== bond0\nSlave Interface: ens1f0\nMII Status: up\nLink Failure Count: 0\n"
+        "Slave Interface: ens1f1\nMII Status: down\nLink Failure Count: 3\n";
+    const auto report = graywatch::report::analyze(files);
+    const auto* nic = find(report, "NIC ens1f0 counted errors");
+    require(nic && nic->severity == Severity::warning && any_contains(nic->details, "crc_errors +12") &&
+                any_contains(nic->details, "missed_errors +500") &&
+                !any_contains(nic->details, "rx0_packets"),
+            "NIC errors and drops, per-queue counters skipped");
+    require(find(report, "NIC ens1f0 sent or received pause frames") != nullptr, "pause frames");
+    const auto* speed = find(report, "NIC ens1f0 runs at 10000 Mb/s of 25000 Mb/s");
+    require(speed && any_contains(speed->details, "advertises up to 10000"), "link speed");
+    require(find(report, "NICs use different MTUs") != nullptr, "MTU mismatch");
+    require(find(report, "receive backlog") != nullptr, "softnet drops");
+    require(find(report, "Interrupts of NIC ens1f0 concentrated on CPU 4") != nullptr,
+            "interrupt concentration via PCI address");
+    require(find(report, "NIC ens1f0 interrupts are handled on another NUMA node") != nullptr,
+            "NUMA placement");
+    require(find(report, "PCIe links narrower") != nullptr, "PCIe width");
+    require(find(report, "thermally throttled") != nullptr, "throttling");
+    require(find(report, "The hypervisor took 15% of the CPU time") != nullptr, "steal");
+    require(find(report, "Bond bond0 has members down: ens1f1") != nullptr, "bond member");
+    const auto* odd = find(report, "Block devices of the same kind");
+    require(odd && any_contains(odd->details, "hard disk scheduler: 2 use mq-deadline; sdc=none"),
+            "block setting outlier");
+    require(report.settings.at("nic ens1f0 mtu") == "9000" &&
+                report.settings.at("hard disk scheduler") == "mq-deadline (most)",
+            "settings recorded for the cluster summary");
+    require_width(report);
 }
 
 int main() {
@@ -592,6 +676,7 @@ int main() {
         test_load_bundle();
         test_history();
         test_cluster();
+        test_platform();
     } catch (const std::exception& error) {
         std::cerr << "report_test: " << error.what() << '\n';
         return 1;

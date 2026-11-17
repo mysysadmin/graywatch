@@ -52,6 +52,9 @@ struct Report {
     // always.
     std::vector<std::string> device_overview;
     std::vector<std::string> coverage;      // limits of this collection
+    // Platform settings worth comparing between hosts (MTU, NIC speed, block
+    // scheduler and writeback settings, sysctls), name -> value.
+    std::map<std::string, std::string> settings;
 };
 
 Report analyze(const Files& files);

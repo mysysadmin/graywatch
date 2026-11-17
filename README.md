@@ -354,6 +354,14 @@ memory, block, TCP, and InfiniBand evidence. The support archive contains:
 - initial and final CPU, I/O, memory, and network JSON state, plus
   `/proc/meminfo` and `/proc/vmstat` snapshots;
 - `events.jsonl`: every one-second interval event;
+- platform snapshots: `platform.txt` (PCIe link width and speed of NICs and
+  storage controllers, NIC MTU and bond membership, NUMA nodes, per-device
+  scheduler, writeback throttling, queue and write-cache settings, a few
+  sysctls, the CPU frequency governor), `ethtool-settings.txt`,
+  `bonding.txt`, and before and after the window `links-*.json`
+  (`ip -s -s -j link`), `ethtool-stats-*.txt` (`ethtool -S` of every
+  hardware NIC), `softnet-*.txt`, `interrupts-*.txt`, `stat-*.txt` and the
+  CPUs' thermal throttle counters in `throttle-*.txt`;
 - `kernel.log`: the last 5,000 kernel log lines (omit with `--no-kernel-log`);
 - `bpf-events.jsonl` and `bpf.stderr`: eBPF helper output when running as root
   on a kernel with BTF (skip with `--no-bpf`);
@@ -396,7 +404,9 @@ works too.
 
 For archives collected on several hosts in the same window (all storage
 servers, say), `--cluster` lists the warning and critical findings that at
-least half of the hosts share once, and the rest per host:
+least half of the hosts share once, the platform settings that differ between
+hosts (MTU, NIC speed, block scheduler and writeback settings, sysctls), and
+the rest per host:
 
 ```sh
 bin/graywatch-report --cluster graywatch-support-fs*.tar.gz
@@ -452,7 +462,17 @@ The report contains:
   whose time is spent queued rather than in the device, tasks still in `D`
   state with their kernel stack, cgroups with run-queue p99 of 10 ms or more,
   the connections that retransmitted, and the processes and cgroups that
-  stalled in reclaim; Graywatch's own processes are filtered out; and
+  stalled in reclaim; Graywatch's own processes are filtered out;
+- platform pointers from the snapshots: NIC error and drop counters that rose
+  during the window (warning from any error or 100 drops), pause frames, a
+  NIC negotiated below its supported speed or at half duplex, different MTUs,
+  bond members down, packets dropped in the kernel's receive backlog, NIC
+  interrupts concentrated on one CPU or handled on another NUMA node than the
+  NIC, PCIe links narrower (warning) or slower (info) than the device
+  supports, thermal throttling, hypervisor steal of 5% or more, a nearly full
+  conntrack table, and block devices set up differently from the others of
+  their kind. The settings also go to the cluster summary, which lists those
+  that differ between hosts; and
 - collection coverage: root or not, PSI status with how to enable it,
   `hidepid`, sampling gaps, and daemon errors.
 
