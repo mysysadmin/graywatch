@@ -424,8 +424,11 @@ The report contains:
   congestion and lower, spread-out retransmits are reported as context, since
   heavy transfers cause them;
 - a timeline of the degraded episodes;
-- kernel log matches (I/O errors, NVMe timeouts, hung tasks, OOM, lockups, link
-  flaps, filesystem and hardware errors). Matches from more than 15 minutes
+- kernel log matches (I/O errors, NVMe timeouts, SCSI/SAS command timeouts and
+  controller resets, PCIe AER errors, a full conntrack table, NIC transmit
+  timeouts, bond members going down, mlx5 command timeouts and completion
+  errors, hung tasks, OOM, lockups, link flaps, filesystem and hardware
+  errors). Matches from more than 15 minutes
   before the window are reported as history rather than as findings. Links
   that only came up, with no link down, as at boot, are info, not a flap; and
 - eBPF findings when `bpf-events.jsonl` is present: FUSE requests still

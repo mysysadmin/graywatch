@@ -274,6 +274,32 @@ const std::vector<KernelPattern>& kernel_patterns() {
          regex(R"(nvme.*(timeout|resetting controller|I/O \d+ QID))", icase),
          "NVMe command timeouts or controller resets. Check firmware, PCIe AER errors "
          "(`dmesg | grep -i aer`) and the drive's error log."},
+        {"SCSI/SAS controller", Severity::warning,
+         regex(R"(timing out command|device_block|rejecting I/O to offline device|attempting task abort|mpt[23]sas.*(reset|fault|log_info)|megaraid.*(reset|timeout|FW in FAULT)|hpsa.*(reset|abort)|aacraid.*(reset|timeout))", icase),
+         "SCSI command timeouts, aborts or controller resets. Many disks at once point at the "
+         "HBA/RAID controller, expander or backplane (firmware, cabling); one disk at that "
+         "disk."},
+        {"PCIe error", Severity::warning,
+         regex(R"(AER: (Corrected|Uncorrected|Multiple)|PCIe Bus Error)", icase),
+         "PCIe errors were reported. The `pcieport`/device address names the slot: check the "
+         "card's seating, riser and firmware. Corrected errors that keep coming degrade the "
+         "link."},
+        {"conntrack table full", Severity::critical,
+         regex(R"(nf_conntrack: (nf_conntrack: )?table full)", icase),
+         "The connection-tracking table is full and new connections are dropped. Raise "
+         "net.netfilter.nf_conntrack_max or exempt storage traffic from tracking."},
+        {"NIC transmit timeout", Severity::warning,
+         regex(R"(NETDEV WATCHDOG|transmit queue \d+ timed out|tx timeout)", icase),
+         "The NIC stopped transmitting and its driver reset it. Check the NIC firmware and "
+         "driver version and the switch port."},
+        {"bond member down", Severity::warning,
+         regex(R"(bond\S*: .*(link status definitely down|now running without any active interface))", icase),
+         "A bonded interface lost a member (or all of them). Check the member's cable, "
+         "transceiver and switch port; the bond runs with reduced bandwidth meanwhile."},
+        {"mlx5 error", Severity::warning,
+         regex(R"(mlx5_core.*(cmd_work_handler|timeout|CQE error|syndrome|health compromised|internal error|fatal))", icase),
+         "The Mellanox/NVIDIA adapter reported command timeouts or completion errors. Check "
+         "its firmware (`mlxfwmanager`), the driver version and the port counters."},
         {"hung task", Severity::critical, regex(R"(blocked for more than \d+ seconds)", exact),
          "The kernel's hung-task detector fired. The stack printed after each report in "
          "kernel.log shows what the task was waiting on."},
@@ -288,7 +314,7 @@ const std::vector<KernelPattern>& kernel_patterns() {
          "CPU lockup or RCU stall: a CPU stopped scheduling. This often points at a "
          "driver or firmware problem."},
         {"link flap", Severity::warning,
-         regex(R"(Link is (Down|Up)|link (down|up)|port .*(DOWN|ACTIVE)|mlx\d_core.*(link|port))", icase),
+         regex(R"(Link is (Down|Up)|link (down|up)|Port: \d+ Link (DOWN|ACTIVE|INIT))", icase),
          "Network or InfiniBand link state changes were logged. Check cables, "
          "transceivers and the switch port."},
         {"filesystem error", Severity::critical,

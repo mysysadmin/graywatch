@@ -218,6 +218,26 @@ void test_kernel_log() {
     report = graywatch::report::analyze(files);
     const auto* flap = find(report, "Kernel log: link flap");
     require(flap && flap->severity == Severity::warning, "link down then up is a flap");
+
+    // Platform faults that are not storage-device errors.
+    const std::string at = "2026-11-07T21:00:10,000000+00:00 ";
+    files["kernel.log"] =
+        at + "sd 0:0:12:0: timing out command, waited 180s\n" +
+        at + "mpt3sas_cm0: sending diag reset !!\n" +
+        at + "pcieport 0000:00:03.0: AER: Corrected error received: 0000:05:00.0\n" +
+        at + "nf_conntrack: nf_conntrack: table full, dropping packet\n" +
+        at + "NETDEV WATCHDOG: ens3f0 (ixgbe): transmit queue 4 timed out\n" +
+        at + "bond0: (slave ens3f1): link status definitely down, disabling slave\n" +
+        at + "mlx5_core 0000:05:00.0: cmd_work_handler:877: timeout. Will cause a leak\n" +
+        at + "mlx5_core 0000:05:00.0 mlx5_0: Port: 1 Link ACTIVE\n";
+    report = graywatch::report::analyze(files);
+    for (const auto* title : {"Kernel log: SCSI/SAS controller (2 lines)", "Kernel log: PCIe error",
+                              "Kernel log: conntrack table full", "Kernel log: NIC transmit timeout",
+                              "Kernel log: bond member down", "Kernel log: mlx5 error (1 line)"}) {
+        require(find(report, title) != nullptr, std::string("kernel pattern: ") + title);
+    }
+    require(find(report, "Kernel log: links came up") != nullptr,
+            "mlx5 port up is a link event, not an mlx5 error");
 }
 
 void test_bpf() {
