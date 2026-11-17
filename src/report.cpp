@@ -2474,7 +2474,7 @@ class Analysis {
         static const std::regex fault(R"(err|crc|fcs|frame|carrier|abort|timeout|symbol)",
                                       std::regex::icase);
         static const std::regex loss(
-            R"(discard|drop|miss|fifo|out_of_buffer|no_buf|nobuf|overrun|over_errors)",
+            R"(discard|drop|missed|fifo|out_of_buffer|no_buf|nobuf|overrun|over_errors)",
             std::regex::icase);
         static const std::regex pause(R"(pause)", std::regex::icase);
         for (const auto& nic : nics) {
@@ -2495,8 +2495,13 @@ class Analysis {
             if (ethtool_before != stats_before.end() && ethtool_after != stats_after.end()) {
                 const auto old = ethtool_counters(ethtool_before->second);
                 for (const auto& [key, value] : ethtool_counters(ethtool_after->second)) {
-                    // Per-queue and size-bucket counters repeat the totals.
-                    if (key.find_first_of("0123456789") != std::string::npos) continue;
+                    // Per-queue and size-bucket counters repeat the totals. Flow
+                    // director (fdir_*) counters count filter matches and misses,
+                    // not lost packets.
+                    if (key.find_first_of("0123456789") != std::string::npos ||
+                        key.starts_with("fdir")) {
+                        continue;
+                    }
                     const auto found = old.find(key);
                     if (found != old.end() && value > found->second) {
                         increase[key] = value - found->second;
@@ -2582,14 +2587,15 @@ class Analysis {
                 nic_pointer_ = true;
             }
         }
-        std::set<std::string> mtus;
+        // Ethernet and IPoIB MTUs are compared separately: they never share a path.
+        std::map<bool, std::set<std::string>> mtus;
         std::vector<std::string> mtu_text;
         for (const auto& [nic, value] : mtu) {
-            mtus.insert(value);
+            mtus[nic.starts_with("ib")].insert(value);
             mtu_text.push_back(nic + "=" + value);
             report_.settings["nic " + nic + " mtu"] = value;
         }
-        if (mtus.size() > 1) {
+        if (mtus[false].size() > 1 || mtus[true].size() > 1) {
             add(Severity::info, "network", "NICs use different MTUs",
                 {"MTU per interface: " + join(mtu_text, ", ") + "."},
                 {"Fine for separate networks. On one path every hop (both hosts and the switch "
@@ -2806,8 +2812,11 @@ class Analysis {
             const auto found = topology_.find(line[1]);
             if (found != topology_.end() && found->second.type != "disk") continue;
             fields["name"] = line[1];
-            by_kind[fields["rotational"] == "1" ? "hard disk" : "solid state"].push_back(
-                std::move(fields));
+            // NVMe and SATA/SAS SSDs have different queues and defaults.
+            const std::string kind = fields["rotational"] == "1" ? "hard disk"
+                                     : line[1].starts_with("nvme") ? "NVMe"
+                                                                   : "SATA/SAS SSD";
+            by_kind[kind].push_back(std::move(fields));
         }
         const auto field = [](const std::map<std::string, std::string>& values,
                               const std::string& key) {

@@ -606,7 +606,8 @@ void test_platform() {
     files["ethtool-stats-initial.txt"] =
         "== ens1f0\nNIC statistics:\n     rx_pause_ctrl_phy: 0\n     rx0_packets: 5\n";
     files["ethtool-stats-final.txt"] =
-        "== ens1f0\nNIC statistics:\n     rx_pause_ctrl_phy: 40000\n     rx0_packets: 900\n";
+        "== ens1f0\nNIC statistics:\n     rx_pause_ctrl_phy: 40000\n     rx0_packets: 900\n"
+        "     fdir_miss: 876\n";
     files["ethtool-settings.txt"] =
         "== ens1f0\nSettings for ens1f0:\n\tSupported link modes:   10000baseKR/Full\n"
         "\t                        25000baseCR/Full\n"
@@ -639,7 +640,8 @@ void test_platform() {
     const auto* nic = find(report, "NIC ens1f0 counted errors");
     require(nic && nic->severity == Severity::warning && any_contains(nic->details, "crc_errors +12") &&
                 any_contains(nic->details, "missed_errors +500") &&
-                !any_contains(nic->details, "rx0_packets"),
+                !any_contains(nic->details, "rx0_packets") &&
+                !any_contains(nic->details, "fdir_miss"),
             "NIC errors and drops, per-queue counters skipped");
     require(find(report, "NIC ens1f0 sent or received pause frames") != nullptr, "pause frames");
     const auto* speed = find(report, "NIC ens1f0 runs at 10000 Mb/s of 25000 Mb/s");

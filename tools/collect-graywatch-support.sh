@@ -301,7 +301,7 @@ platform_settings() {
         for path in /sys/class/net/*/device /sys/class/scsi_host/*/device \
                     /sys/class/nvme/*/device; do
             [ -e "$path" ] || continue
-            pci=$(readlink -f "$path")
+            pci=$(readlink -f "$path") || continue
             # A SCSI host's device is the controller's PCI function's child.
             while [ -n "$pci" ] && [ "$pci" != / ] && [ ! -e "$pci/current_link_speed" ]; do
                 pci=${pci%/*}
@@ -314,11 +314,11 @@ platform_settings() {
                 "current_width=$(cat "$pci/current_link_width" 2>/dev/null)" \
                 "max_width=$(cat "$pci/max_link_width" 2>/dev/null)" \
                 "numa_node=$(cat "$pci/numa_node" 2>/dev/null)"
-        done | awk '!seen[$2]++'  # one line per PCI function (a controller has many hosts)
+        done | awk '$3 !~ /^host/ || !seen[$2]++'  # a SCSI controller has many hosts
         for nic in $(physical_nics); do
             master=""
             if [ -e "/sys/class/net/$nic/master" ]; then
-                master=$(basename "$(readlink -f "/sys/class/net/$nic/master")")
+                master=$(basename "$(readlink -f "/sys/class/net/$nic/master")") || master=""
             fi
             echo "nic $nic mtu=$(cat "/sys/class/net/$nic/mtu" 2>/dev/null)" \
                 "operstate=$(cat "/sys/class/net/$nic/operstate" 2>/dev/null)" \
@@ -333,7 +333,10 @@ platform_settings() {
             device=${queue%/queue}
             device=${device##*/}
             case "$device" in loop*|ram*|zram*) continue ;; esac
-            scheduler=$(sed -n 's/.*\[\(.*\)\].*/\1/p' "$queue/scheduler" 2>/dev/null)
+            # device-mapper devices have no scheduler file (set -e: never let an
+            # assignment fail here).
+            scheduler=$(sed -n 's/.*\[\(.*\)\].*/\1/p' "$queue/scheduler" 2>/dev/null) ||
+                scheduler=""
             echo "block $device rotational=$(cat "$queue/rotational" 2>/dev/null)" \
                 "scheduler=${scheduler:-none}" \
                 "wbt_lat_usec=$(cat "$queue/wbt_lat_usec" 2>/dev/null)" \
@@ -365,7 +368,7 @@ snapshot() {
     done
     cp /proc/meminfo "$work/meminfo-$1.txt" 2>/dev/null || true
     cp /proc/vmstat "$work/vmstat-$1.txt" 2>/dev/null || true
-    platform_counters "$1"
+    platform_counters "$1" || note_error "platform counters $1 incomplete"
 }
 
 # The eBPF helper needs root and kernel BTF. It stops by itself after the
@@ -384,7 +387,9 @@ if [ "$bpf" -eq 1 ]; then
     fi
 fi
 
-platform_settings
+# Optional evidence: called in an || list so that set -e does not end the
+# collection when a sysfs file is missing on some kernel or device type.
+platform_settings || note_error "platform settings incomplete"
 sleep 2
 snapshot initial
 echo "Collecting for ${duration}s; press Ctrl-C to abort." >&2
