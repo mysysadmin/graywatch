@@ -129,7 +129,10 @@ cleanup() {
     done
     rm -rf "$work"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# Without the exit the script would carry on after cleanup removed $work.
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 # Record a failed optional step instead of aborting the whole collection: a
 # partial archive is more useful to support than none.

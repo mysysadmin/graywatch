@@ -494,7 +494,15 @@ std::map<__u32, std::string> fuse_mounts() {
         std::istringstream fields(line);
         std::string id, parent, device, root, point;
         if (!(fields >> id >> parent >> device >> root >> point)) continue;
-        if (line.find(" - fuse") == std::string::npos) continue;
+        // The filesystem type follows " - ": fuse, fuse.NAME or fuseblk. A plain
+        // prefix match would also take fusectl, whose dev_t is not a FUSE
+        // connection.
+        const auto separator = line.find(" - ");
+        if (separator == std::string::npos) continue;
+        std::istringstream rest(line.substr(separator + 3));
+        std::string type;
+        if (!(rest >> type)) continue;
+        if (type != "fuse" && type != "fuseblk" && type.rfind("fuse.", 0) != 0) continue;
         unsigned int major{}, minor{};
         if (std::sscanf(device.c_str(), "%u:%u", &major, &minor) != 2) continue;
         mounts[(major << 20) | minor] = point;
@@ -623,7 +631,10 @@ __u32 fuse_opcode_from_stack(const std::vector<std::string>& frames) {
         {"fuse_do_readfolio", 15}, {"fuse_do_readpage", 15}, {"fuse_statfs", 17},
         {"fuse_getxattr", 22}, {"fuse_listxattr", 23}, {"fuse_setxattr", 21},
         {"fuse_removexattr", 24}, {"fuse_access", 34}, {"fuse_file_fallocate", 43},
-        {"fuse_readlink_page", 5}, {"fuse_get_link", 5}};
+        {"fuse_readlink_page", 5}, {"fuse_get_link", 5},
+        // fuse_setlk sends SETLK or SETLKW; only the blocking SETLKW waits
+        // long enough to be found by its stack.
+        {"fuse_getlk", 31}, {"fuse_setlk", 33}};
     for (const auto& frame : frames) {
         for (const auto& [name, opcode] : callers) {
             if (frame == name) return opcode;
