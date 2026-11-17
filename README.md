@@ -107,11 +107,9 @@ Verdict: CRITICAL. 14 findings need attention (4 critical).
 Assessment
 ----------
 
-* A FUSE CREATE request on /quobyte waited 482 s without an answer. The FUSE
-  daemon (the storage client) or the service it depends on stopped answering:
-  start with that daemon's logs and its connections to its storage service.
-  Disk, memory and network findings from the same window are context unless they
-  show errors.
+* A FUSE CREATE request on /quobyte waited 482 s without an answer. In the same
+  window local block devices were degraded on this host: rule these out before
+  the FUSE daemon.
 ```
 
 If nothing was wrong during the collection, the verdict says so. Collect again
@@ -407,24 +405,34 @@ The report contains:
   per-process measurements, and a process whose longest wait was short is
   reported as busy rather than stuck (info, not critical);
 - FUSE mounts the daemon saw `stalled`, and requests the eBPF helper saw
-  waiting without an answer. An unanswered FUSE request is ranked first and
-  leads the assessment, because disk, memory and network findings in the
-  same window are then usually its context, not its cause;
+  waiting without an answer. An unanswered FUSE request is where a delay
+  shows, not necessarily where it starts: the assessment names the platform
+  findings from the same window next to it (degraded disks, network errors,
+  retransmits concentrated on one peer, memory or CPU pressure), and findings
+  are ranked by severity only. A `stalled` mount for which eBPF saw no long
+  synchronous wait is reported as background requests waiting (warning).
+  Whenever FUSE requests are slow or unanswered, the coverage notes that one
+  host cannot clear the storage servers;
 - per-device latency percentiles, memory reclaim/swap/OOM totals, TCP
   retransmissions, and InfiniBand port state. Block errors on pass-through
   commands (`drv_in`/`drv_out`, typically SMART queries) are info, errors on
   unnamed operations a warning, and read/write/flush errors critical. Network
-  errors (TCP input errors, InfiniBand receive errors, link down) are called a
-  likely contributor; congestion and retransmits alone are reported as
-  context, since heavy transfers cause them;
+  errors (TCP input errors, a retransmit ratio of 1% or more, InfiniBand
+  receive errors, link down) are called a likely contributor, and so are
+  retransmits of which one peer takes at least half (1,000 or more);
+  congestion and lower, spread-out retransmits are reported as context, since
+  heavy transfers cause them;
 - a timeline of the degraded episodes;
 - kernel log matches (I/O errors, NVMe timeouts, hung tasks, OOM, lockups, link
   flaps, filesystem and hardware errors). Matches from more than 15 minutes
   before the window are reported as history rather than as findings. Links
   that only came up, with no link down, as at boot, are info, not a flap; and
 - eBPF findings when `bpf-events.jsonl` is present: FUSE requests still
-  waiting for the daemon (critical at 5 s, marked when they were already
-  waiting before the collection started), slow FUSE opcodes, block devices
+  waiting for the daemon (critical at 5 s, 30 s for directory listings,
+  FSYNC, FLUSH and FALLOCATE; marked when they were already waiting before the
+  collection started), slow FUSE opcodes (p99 100 ms or max 1 s; p99 1 s or
+  max 5 s for those slower operations), long lock waits (SETLKW) as info
+  only, block devices
   whose time is spent queued rather than in the device, tasks still in `D`
   state with their kernel stack, cgroups with run-queue p99 of 10 ms or more,
   the connections that retransmitted, and the processes and cgroups that

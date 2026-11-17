@@ -322,16 +322,23 @@ void test_incident_triage() {
                 any_contains(blocked->details, "the longest 12 ms"),
             "eBPF qualifies D-state snapshots");
 
-    // 3. The unanswered request leads; load-only network evidence is context.
-    require(!report.findings.empty() &&
-                report.findings.front().title == "FUSE requests stuck without an answer",
-            "hung request is the first finding");
-    require(any_contains(report.findings.front().details, "already waiting when the collection"),
+    // 3. The unanswered request is reported with the platform evidence from
+    //    the same window next to it, not above it; load-only network evidence
+    //    is context.
+    const auto* hung = find(report, "FUSE requests stuck without an answer");
+    require(hung && hung->severity == Severity::critical, "hung request is critical");
+    require(any_contains(hung->details, "already waiting when the collection"),
             "pre-existing request flagged");
+    require(report.findings.front().area != "fuse",
+            "platform findings of the same severity are not ranked below the hung request");
     require(!report.conclusions.empty() &&
                 report.conclusions.front().starts_with(
-                    "A FUSE CREATE request on /quobyte waited 482 s"),
-            "assessment leads with the stuck request");
+                    "A FUSE CREATE request on /quobyte waited 482 s") &&
+                report.conclusions.front().find("local block devices were degraded") !=
+                    std::string::npos,
+            "assessment names the platform evidence next to the stuck request");
+    require(any_contains(report.coverage, "cannot clear the storage servers"),
+            "one host cannot clear the storage servers");
     require(any_contains(report.conclusions, "common during heavy transfers"),
             "congestion is context");
     require(!any_contains(report.conclusions, "likely contributor"),
@@ -370,12 +377,58 @@ void test_daemon_fuse() {
     files["bpf-events.jsonl"] =
         R"({"event_type":"bpf_status","collectors":[{"name":"fuse","enabled":true}]})" "\n";
     const auto with_bpf = graywatch::report::analyze(files);
-    const auto* background = find(with_bpf, "FUSE mount /quobyte made no progress");
-    require(background && any_contains(background->details, "background requests") &&
+    const auto* background = find(with_bpf, "FUSE mount /quobyte: background requests waiting");
+    require(background && background->severity == Severity::warning &&
+                any_contains(background->details, "background requests") &&
                 !any_contains(background->details, "eBPF FUSE findings name"),
-            "stall without a synchronous wait is called background");
-    require(any_contains(with_bpf.conclusions, "most likely background reads or writeback"),
-            "assessment mentions background requests");
+            "stall without a synchronous wait is a background warning");
+    require(!any_contains(with_bpf.conclusions, "answered nothing"),
+            "a background stall does not lead the assessment");
+}
+
+// Limits per FUSE operation: listings and lock waits are not judged like
+// lookups.
+void test_fuse_limits() {
+    auto files = bundle(false);
+    const auto interval = [](const char* opcode, const char* histogram, double max_ms,
+                             double oldest_ms) {
+        return std::string(R"({"event_type":"bpf_interval","collector":"fuse",)"
+                           R"("timestamp":"2026-11-07T21:00:12.000Z","mount":"/quobyte",)"
+                           R"("opcode":")") + opcode + R"(","count":10,"total_ms":1420,"max_ms":)" +
+               std::to_string(max_ms) + R"(,"histogram_us":)" + histogram +
+               R"(,"errors":0,"outstanding":0,"oldest_outstanding_ms":)" +
+               std::to_string(oldest_ms) + "}\n";
+    };
+    files["bpf-events.jsonl"] =
+        R"({"event_type":"bpf_status","collectors":[{"name":"fuse","enabled":true}]})" "\n" +
+        interval("READDIRPLUS", R"({"262144":10})", 240.0, 0.0) +
+        interval("SETLKW", R"({})", 0.0, 60000.0) +
+        interval("FSYNC", R"({"2097152":10})", 1900.0, 12000.0);
+    const auto report = graywatch::report::analyze(files);
+    const auto* slow = find(report, "Slow FUSE operations");
+    require(slow && !any_contains(slow->details, "READDIRPLUS") &&
+                any_contains(slow->details, "FSYNC"),
+            "a 262 ms listing is normal, a 2 s fsync is slow");
+    require(find(report, "FUSE requests stuck") == nullptr,
+            "a 12 s fsync and a 60 s lock wait are not stuck");
+    const auto* locks = find(report, "Long FUSE lock waits");
+    require(locks && locks->severity == Severity::info, "lock waits are info");
+}
+
+// Retransmits concentrated on one peer are a fault on that peer or its path.
+void test_retransmit_peer() {
+    auto files = bundle(false);
+    files["bpf-events.jsonl"] =
+        R"({"event_type":"bpf_status","collectors":[{"name":"tcp_retransmit","enabled":true}]})" "\n"
+        R"({"event_type":"bpf_interval","collector":"tcp_retransmit","source":"10.0.0.1:7863",)"
+        R"("destination":"10.0.0.26:40000","state":"ESTABLISHED","retransmits":9000})" "\n"
+        R"({"event_type":"bpf_interval","collector":"tcp_retransmit","source":"10.0.0.1:7863",)"
+        R"("destination":"10.0.0.27:40000","state":"ESTABLISHED","retransmits":300})" "\n";
+    const auto report = graywatch::report::analyze(files);
+    const auto* peer = find(report, "TCP retransmits concentrated on 10.0.0.26");
+    require(peer && peer->severity == Severity::warning &&
+                any_contains(peer->details, "97% of all retransmits"),
+            "concentrated retransmits name the peer");
 }
 
 void test_device_grouping() {
@@ -488,6 +541,8 @@ int main() {
         test_bpf();
         test_incident_triage();
         test_daemon_fuse();
+        test_fuse_limits();
+        test_retransmit_peer();
         test_device_grouping();
         test_render();
         test_load_bundle();

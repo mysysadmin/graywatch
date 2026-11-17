@@ -164,6 +164,30 @@ struct Histogram {
     [[nodiscard]] double average_ms() const { return count > 0 ? total_ms / count : 0.0; }
 };
 
+// When a FUSE operation counts as slow (p99 or maximum) and as stuck. Lookups
+// and attribute calls answer from the client's cache or one metadata round
+// trip. Directory listings return many entries per request, and fsync, flush
+// and fallocate wait for the data to reach the storage service, so they are
+// legitimately slower: a healthy READDIRPLUS averaged 142 ms on Quobyte.
+// Lock waits block until another holder releases the lock: their duration is
+// the application's, not the filesystem's, so they are never slow or stuck.
+struct FuseLimits {
+    double slow_p99_ms;
+    double slow_max_ms;
+    double stuck_ms;
+    bool lock_wait;
+};
+
+FuseLimits fuse_limits(const std::string& opcode) {
+    static const std::set<std::string> lock{"SETLKW"};
+    static const std::set<std::string> bulk{"READDIR",  "READDIRPLUS", "FSYNC",
+                                            "FSYNCDIR", "FLUSH",       "FALLOCATE",
+                                            "SYNCFS",   "COPY_FILE_RANGE"};
+    if (lock.contains(opcode)) return {0.0, 0.0, 0.0, true};
+    if (bulk.contains(opcode)) return {1000.0, 5000.0, 30000.0, false};
+    return {100.0, 1000.0, 5000.0, false};
+}
+
 }  // namespace
 
 std::string_view to_string(Severity severity) {
@@ -474,18 +498,12 @@ class Analysis {
         check_kernel_log();
         correlate();
         check_history();
-        // Within a severity, hung requests (nothing is answering) come before
-        // degraded performance (things are slow but still moving).
-        const auto hung = [](const Finding& finding) {
-            return finding.area == "fuse" && (finding.title.find("stuck") != std::string::npos ||
-                                              finding.title.find("no progress") != std::string::npos);
-        };
+        // Findings rank by severity only. A hung FUSE request is where a delay
+        // shows, not necessarily where it starts, so it gets no precedence over
+        // platform findings of the same severity.
         std::stable_sort(report_.findings.begin(), report_.findings.end(),
-                         [&](const Finding& a, const Finding& b) {
-                             if (a.severity != b.severity) {
-                                 return static_cast<int>(a.severity) < static_cast<int>(b.severity);
-                             }
-                             return hung(a) && !hung(b);
+                         [](const Finding& a, const Finding& b) {
+                             return static_cast<int>(a.severity) < static_cast<int>(b.severity);
                          });
         std::stable_sort(report_.timeline.begin(), report_.timeline.end(),
                          [](const auto& a, const auto& b) { return a.start < b.start; });
@@ -513,20 +531,24 @@ class Analysis {
     // The daemon's fusectl counter includes background requests (readahead,
     // writeback, async I/O) that the eBPF hook on synchronous requests does
     // not see. When eBPF ran and saw no long wait on a stalled mount, say so.
+    // A frozen count with no long synchronous wait is not evidence that the
+    // daemon stopped answering: under steady writeback the background queue
+    // can sit at its limit while requests keep completing. Such a stall is a
+    // warning and does not lead the assessment.
     void annotate_fuse_stalls() {
         if (!bpf_enabled("fuse")) return;
         for (const auto& [path, index] : fuse_stall_finding_) {
             if (bpf_stuck_mounts_.contains(path)) continue;
-            auto& details = report_.findings[index].details;
+            auto& finding = report_.findings[index];
+            finding.severity = Severity::warning;
+            finding.title = "FUSE mount " + path + ": background requests waiting";
+            auto& details = finding.details;
             if (details.size() > 1) details.pop_back();  // "The eBPF FUSE findings name ..."
             details.push_back("eBPF saw no synchronous request on this mount waiting that long, "
                               "so the waiting requests are most likely background requests "
                               "(readahead, writeback or asynchronous I/O) waiting on the storage "
                               "service.");
-            if (fuse_stuck_from_fusectl_ == path && fuse_stuck_.starts_with("The FUSE mount ")) {
-                fuse_stuck_ += " eBPF saw no synchronous request waiting that long, so these "
-                               "are most likely background reads or writeback.";
-            }
+            if (fuse_stuck_from_fusectl_ == path) fuse_stuck_.clear();
         }
     }
 
@@ -1164,10 +1186,14 @@ class Analysis {
                          run.peak->number("severity", 0.0));
             }
             if (bad > 0 || errors > 0) {
-                // Input errors are faults; retransmissions alone are usually load.
-                if (errors > 0) network_bad_ = true;
+                // Input errors are faults, and so is a retransmit ratio of 1% or
+                // more over the whole window: a healthy data-center network stays
+                // well below 0.1% even under load. Below that, retransmissions
+                // are usually load.
+                if (errors > 0 || ratio >= 1.0) network_bad_ = true;
                 else network_load_ = true;
-                add(bad >= 3 || errors > 0 ? Severity::warning : Severity::info, "network",
+                add(bad >= 3 || errors > 0 || ratio >= 1.0 ? Severity::warning : Severity::info,
+                    "network",
                     format("TCP retransmissions or errors in %zu of %zu intervals", bad, tcp.size()),
                     {format("%.0f of %.0f segments retransmitted (%.2f%%), %.0f input errors, %.0f "
                             "resets sent.", retransmits, segments, ratio, errors, resets),
@@ -1393,22 +1419,34 @@ class Analysis {
         if (operations.empty()) return;
         std::vector<std::string> slow;
         std::vector<std::string> stuck;
+        std::vector<std::string> locks;
         std::vector<std::string> summary;
-        double worst_p99{};
+        bool slow_critical{};
         double worst_stuck{};
         for (const auto& [key, op] : operations) {
             const auto& [mount, opcode] = key;
+            const auto limits = fuse_limits(opcode);
             const double p99 = op.histogram.quantile_ms(0.99);
             const std::string line = format(
                 "%s %s: %.0f requests, average %.2f ms, p99 <= %.1f ms, max %.1f ms, %.0f errors.",
                 mount.c_str(), opcode.c_str(), op.histogram.count, op.histogram.average_ms(), p99,
                 op.histogram.max_ms, op.errors);
             if (op.histogram.count > 0) summary.push_back(line);
-            if (op.histogram.count >= 1 && (p99 >= 100.0 || op.histogram.max_ms >= 1000.0)) {
-                slow.push_back(line);
-                worst_p99 = std::max(worst_p99, std::max(p99, op.histogram.max_ms));
+            if (limits.lock_wait) {
+                if (op.oldest_ms >= 5000.0 || op.histogram.max_ms >= 5000.0) {
+                    locks.push_back(format("%s %s: longest wait %.1f s.", mount.c_str(),
+                                           opcode.c_str(),
+                                           std::max(op.oldest_ms, op.histogram.max_ms) / 1000.0));
+                }
+                continue;
             }
-            if (op.oldest_ms >= 5000.0) {
+            if (op.histogram.count >= 1 &&
+                (p99 >= limits.slow_p99_ms || op.histogram.max_ms >= limits.slow_max_ms)) {
+                slow.push_back(line);
+                slow_critical = slow_critical || p99 >= 10.0 * limits.slow_p99_ms ||
+                                op.histogram.max_ms >= limits.stuck_ms;
+            }
+            if (op.oldest_ms >= limits.stuck_ms) {
                 bpf_stuck_mounts_.insert(mount);
                 stuck.push_back(format(
                     "%s %s request outstanding for %.1f s at %s%s.", mount.c_str(), opcode.c_str(),
@@ -1438,11 +1476,19 @@ class Analysis {
                  "threads stuck in `D`) and whether it can reach its storage service.",
                  "Compare with the network and InfiniBand findings for the same time."});
         }
+        if (!locks.empty()) {
+            add(Severity::info, "fuse", "Long FUSE lock waits", std::move(locks),
+                {"A blocking lock request waits until the current holder releases the lock, so "
+                 "its duration is set by the application, not by the filesystem. Relevant only "
+                 "if the holder is known to have exited or released it."});
+        }
         if (!slow.empty()) {
             fuse_slow_ = true;
-            add(worst_p99 >= 1000.0 ? Severity::critical : Severity::warning, "fuse",
+            add(slow_critical ? Severity::critical : Severity::warning, "fuse",
                 "Slow FUSE operations", std::move(slow),
-                {"FUSE latency is the time from the kernel sending a request until the daemon "
+                {"Limits: p99 100 ms or max 1 s for metadata, READ and WRITE; p99 1 s or max "
+                 "5 s for directory listings, FSYNC, FLUSH and FALLOCATE.",
+                 "FUSE latency is the time from the kernel sending a request until the daemon "
                  "answers, which includes the daemon's own backend round trips. If local disks "
                  "are healthy, the delay is in the client daemon, its storage service, or the "
                  "network path between them.",
@@ -1698,6 +1744,23 @@ class Analysis {
                                        peer_ranked[index].second));
         }
         details.push_back("By peer: " + join(peer_text, ", ") + ".");
+        // One peer taking most of many retransmits is a fault on that peer or
+        // the path to it, whatever the load: other peers carried the same
+        // traffic pattern without it.
+        const auto& [top_peer, top_count] = peer_ranked.front();
+        if (peer_ranked.size() >= 2 && top_count >= 1000 && top_count >= 0.5 * total) {
+            retransmit_peer_ = top_peer;
+            details.insert(details.begin(),
+                           format("%.0f%% of all retransmits went to %s.",
+                                  100.0 * top_count / total, top_peer.c_str()));
+            add(Severity::warning, "network", "TCP retransmits concentrated on " + top_peer,
+                std::move(details),
+                {"Check that host's NIC counters and the switch ports on the path to it; "
+                 "`ss -ti dst " + top_peer + "` shows rto and retrans per connection.",
+                 "If it is a client of this host, its own load (CPU, receive drops) can cause "
+                 "this too."});
+            return;
+        }
         add(network_bad_ || network_load_ || total >= 100 ? Severity::warning : Severity::info, "network",
             format("TCP retransmits on %zu connections", ranked.size()), std::move(details),
             {"Retransmits concentrated on one peer point at that peer or the path to it; spread "
@@ -2050,15 +2113,42 @@ class Analysis {
 
     void correlate() {
         auto& conclusions = report_.conclusions;
-        // An unanswered request is the most direct evidence there is: lead with it.
+        const bool memory_significant = std::any_of(
+            report_.findings.begin(), report_.findings.end(), [](const Finding& finding) {
+                return finding.area == "memory" && finding.severity != Severity::info;
+            });
+        const bool io_critical = std::any_of(
+            report_.findings.begin(), report_.findings.end(), [](const Finding& finding) {
+                return finding.area == "io" && finding.severity == Severity::critical;
+            });
+        // An unanswered request is where the delay shows, not necessarily where
+        // it starts. Name the platform evidence from the same window next to it
+        // instead of ranking that evidence below it.
         if (!fuse_stuck_.empty()) {
-            conclusions.push_back(
-                fuse_stuck_ + " The FUSE daemon (the storage client) or the service it depends "
-                "on stopped answering: start with that daemon's logs and its connections to its "
-                "storage service. Disk, memory and network findings from the same window are "
-                "context unless they show errors.");
+            std::vector<std::string> platform;
+            if (io_critical) platform.push_back("local block devices were degraded");
+            if (network_bad_) platform.push_back("the network showed errors");
+            if (!retransmit_peer_.empty()) {
+                platform.push_back("TCP retransmits concentrated on " + retransmit_peer_);
+            }
+            if (memory_significant) platform.push_back("memory was under pressure");
+            if (psi_cpu_) platform.push_back("CPUs were contended");
+            if (platform.empty()) {
+                conclusions.push_back(
+                    fuse_stuck_ + " No platform finding on this host overlaps it, so the delay is "
+                    "in the FUSE daemon, its storage service or the network path to it.");
+            } else {
+                conclusions.push_back(
+                    fuse_stuck_ + " In the same window " + join(platform, ", ") +
+                    " on this host: rule these out before the FUSE daemon.");
+            }
         }
         const bool fuse = blocked_categories_.contains("fuse") || fuse_slow_;
+        if (fuse) {
+            report_.coverage.push_back(
+                "This report covers one host. It cannot clear the storage servers behind slow or "
+                "unanswered FUSE requests: collect them for the same window.");
+        }
         const bool nfs = blocked_categories_.contains("nfs");
         if (fuse || nfs) {
             const std::string layer = fuse ? "FUSE" : "NFS";
@@ -2069,10 +2159,14 @@ class Analysis {
                     " client, its storage service or the network path to it.");
             }
             if (network_bad_) {
-                conclusions.push_back("Network/InfiniBand errors (link down, port errors or TCP "
-                                      "input errors) occurred during the same window as " + layer +
-                                      " delays; the network path to the storage service is a "
-                                      "likely contributor.");
+                conclusions.push_back("Network/InfiniBand errors (link down, port errors, TCP "
+                                      "input errors or retransmits above 1%) occurred during the "
+                                      "same window as " + layer + " delays; the network path to "
+                                      "the storage service is a likely contributor.");
+            } else if (!retransmit_peer_.empty()) {
+                conclusions.push_back("TCP retransmits concentrated on " + retransmit_peer_ +
+                                      " during the same window as " + layer + " delays: that "
+                                      "peer or the path to it is a likely contributor.");
             } else if (network_load_) {
                 conclusions.push_back("InfiniBand congestion or TCP retransmits occurred during "
                                       "the same window. They are common during heavy transfers; "
@@ -2096,10 +2190,6 @@ class Analysis {
                                   "guardrails; look at short bursts in the eBPF block findings or "
                                   "at dirty-page throttling.");
         }
-        const bool memory_significant = std::any_of(
-            report_.findings.begin(), report_.findings.end(), [](const Finding& finding) {
-                return finding.area == "memory" && finding.severity != Severity::info;
-            });
         if (memory_significant &&
             (!unhealthy_io_.empty() || blocked_categories_.contains("memory"))) {
             conclusions.push_back("Memory reclaim coincided with I/O waits; page-cache pressure "
@@ -2124,6 +2214,7 @@ class Analysis {
     std::map<std::string, std::size_t> fuse_stall_finding_;  // mount -> finding index
     std::set<std::string> bpf_stuck_mounts_;
     std::string fuse_stuck_from_fusectl_;  // mount whose fusectl stall set fuse_stuck_
+    std::string retransmit_peer_;          // peer taking most TCP retransmits, if one does
     bool psi_cpu_{};
     bool network_bad_{};
     bool network_load_{};      // congestion or retransmits, no errors
