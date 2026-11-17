@@ -617,11 +617,15 @@ void test_platform() {
     files["interrupts-initial.txt"] =
         "           CPU0       CPU1       CPU2       CPU3       CPU4       CPU5       CPU6       CPU7\n"
         " 80:          0          0          0          0          0          0          0          0  "
-        "IR-PCI-MSIX-0000:05:00.0   0-edge      mlx5_comp0@pci:0000:05:00.0\n";
+        "IR-PCI-MSIX-0000:05:00.0   0-edge      mlx5_comp0@pci:0000:05:00.0\n"
+        " 81:          0          0          0          0          0          0          0          0  "
+        "IR-PCI-MSIX-0000:05:00.0   1-edge      mlx5_comp1@pci:0000:05:00.0\n";
     files["interrupts-final.txt"] =
         "           CPU0       CPU1       CPU2       CPU3       CPU4       CPU5       CPU6       CPU7\n"
         " 80:          0          0          0          0     900000          0          0          0  "
-        "IR-PCI-MSIX-0000:05:00.0   0-edge      mlx5_comp0@pci:0000:05:00.0\n";
+        "IR-PCI-MSIX-0000:05:00.0   0-edge      mlx5_comp0@pci:0000:05:00.0\n"
+        " 81:          0          0          0          0       1000          0          0          0  "
+        "IR-PCI-MSIX-0000:05:00.0   1-edge      mlx5_comp1@pci:0000:05:00.0\n";
     files["stat-initial.txt"] = "cpu 100 0 100 1000 0 0 0 0 0 0\n";
     files["stat-final.txt"] = "cpu 200 0 200 1500 0 0 0 120 0 0\n";
     files["throttle-initial.txt"] =

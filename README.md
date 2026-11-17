@@ -467,8 +467,8 @@ The report contains:
   during the window (warning from any error or 100 drops), pause frames, a
   NIC negotiated below its supported speed or at half duplex, different MTUs,
   bond members down, packets dropped in the kernel's receive backlog, NIC
-  interrupts concentrated on one CPU or handled on another NUMA node than the
-  NIC, PCIe links narrower (warning) or slower (info) than the device
+  interrupts concentrated on one CPU (for a NIC with several queues) or
+  handled on another NUMA node than the NIC, PCIe links narrower (warning) or slower (info) than the device
   supports, thermal throttling, hypervisor steal of 5% or more, a nearly full
   conntrack table, and block devices set up differently from the others of
   their kind. The settings also go to the cluster summary, which lists those

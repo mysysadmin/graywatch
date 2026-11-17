@@ -2674,12 +2674,14 @@ class Analysis {
             const std::string& nic = line[1];
             const auto pci = pci_of.find(nic);
             std::vector<double> per_cpu;
+            std::size_t vectors = 0;
             for (const auto& [name, counts] : after) {
                 const bool mine = name.find(nic) != std::string::npos ||
                                   (pci != pci_of.end() &&
                                    name.find(pci->second.first) != std::string::npos);
                 const auto old = before.find(name);
                 if (!mine || old == before.end()) continue;
+                ++vectors;
                 if (per_cpu.size() < counts.size()) per_cpu.resize(counts.size());
                 for (std::size_t cpu = 0; cpu < counts.size() && cpu < old->second.size(); ++cpu) {
                     per_cpu[cpu] += std::max(0.0, counts[cpu] - old->second[cpu]);
@@ -2690,7 +2692,8 @@ class Analysis {
             if (per_cpu.size() < 4 || total / seconds < 1000.0) continue;
             const auto busiest = std::max_element(per_cpu.begin(), per_cpu.end());
             const auto cpu = static_cast<int>(busiest - per_cpu.begin());
-            if (*busiest >= 0.5 * total) {
+            // A NIC with a single interrupt vector cannot spread its load.
+            if (vectors >= 2 && *busiest >= 0.5 * total) {
                 add(Severity::warning, "network",
                     format("Interrupts of NIC %s concentrated on CPU %d", nic.c_str(), cpu),
                     {format("CPU %d handled %.0f%% of %.0f interrupts per second.", cpu,
