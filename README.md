@@ -23,7 +23,7 @@ agent or dashboard.
    sudo ./collect-graywatch-support.sh
    ```
 
-   It collects for 60 seconds (`--duration` changes that), then prints the
+   It collects for 10 minutes (`--duration` changes that), then prints the
    path of the archive it wrote, typically a few hundred KB, and of a copy of
    its report next to it.
 
@@ -59,9 +59,10 @@ It installs to `/opt/graywatch` and starts:
 - `graywatchd.service`, unprivileged as user `graywatch`. It keeps every event
   of the last 30 minutes in `/var/log/graywatch` (a flight recorder) and logs
   problem periods to `/var/log/graywatch/changes.jsonl`.
-- `graywatch-capture.path`, which runs a full root collection with eBPF when a
-  problem lasts 60 s at severity 0.75 or more, at most once an hour, into
-  `/var/lib/graywatch/captures` (newest 10 kept).
+- `graywatch-capture.path`, which runs a one-minute root collection with eBPF
+  when a problem lasts 60 s at severity 0.75 or more, at most once an hour,
+  into `/var/lib/graywatch/captures` (newest 10 kept). Disk saturation alone
+  stays below 0.75 and never triggers one.
 
 Every later collection on the node includes the recorded minutes before it
 (`history-events.jsonl`) and the problem log (`changes.jsonl`), and its report
@@ -91,13 +92,16 @@ on. See [Enabling PSI](#enabling-psi).
 
 The report has these parts, from most to least important:
 
-- **Verdict:** CRITICAL, WARNING, or no degradation detected.
+- **Verdict:** CRITICAL, WARNING, or no degradation detected, followed by
+  the warning and critical findings in one line each.
 - **Assessment:** the conclusion in a few sentences, most likely cause first.
   When an assessment says a signal is context, it happened at the same time
   but probably did not cause the problem.
 - **Findings:** numbered, worst first, each with its evidence and next steps.
 - **Timeline, resource overview and collection coverage:** details, and what
-  could not be collected.
+  could not be collected. With more than 25 episodes the timeline shows the
+  25 most severe; with more than 24 per-device lines (a storage server) the
+  overview leaves them to `--format json` (`device_overview`).
 
 An excerpt from the fio test:
 
@@ -389,6 +393,14 @@ bin/graywatch-report graywatch-incident.tar.gz --format json
 
 A plain `.tar`, as some upload tools leave the archive after unpacking it,
 works too.
+
+For archives collected on several hosts in the same window (all storage
+servers, say), `--cluster` lists the warning and critical findings that at
+least half of the hosts share once, and the rest per host:
+
+```sh
+bin/graywatch-report --cluster graywatch-support-fs*.tar.gz
+```
 
 The report contains:
 

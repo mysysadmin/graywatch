@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-duration=60
+duration=600
 output=""
 output_dir=""
 keep_archives=""

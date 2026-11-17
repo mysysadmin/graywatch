@@ -47,6 +47,10 @@ struct Report {
     std::vector<std::string> conclusions;   // cross-signal assessment
     std::vector<TimelineEntry> timeline;    // sorted by start
     std::vector<std::string> overview;      // per-resource summary lines
+    // One line per block device and request type. Storage servers have dozens
+    // of disks: text and Markdown print these only when there are few, JSON
+    // always.
+    std::vector<std::string> device_overview;
     std::vector<std::string> coverage;      // limits of this collection
 };
 
@@ -56,5 +60,10 @@ enum class Format { text, markdown, json };
 std::string render(const Report& report, Format format);
 
 std::string_view to_string(Severity severity);
+
+// One summary for archives collected on several hosts in the same window: a
+// finding that at least half of the hosts share (same title) is listed once
+// with the hosts that have it, the rest per host. Info findings are left out.
+std::string render_cluster(const std::vector<Report>& reports);
 
 }  // namespace graywatch::report

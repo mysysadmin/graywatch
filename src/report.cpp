@@ -1146,7 +1146,7 @@ class Analysis {
             row.p50 = percentile(latency, 0.50);
             row.p95 = percentile(latency, 0.95);
             row.maximum = *std::max_element(latency.begin(), latency.end());
-            report_.overview.push_back(format(
+            report_.device_overview.push_back(format(
                 "Disk %s: %zu active intervals, latency p50 %.2f / p95 %.2f / max %.2f ms, busy "
                 "max %.0f%%, read %s, written %s.", device_label(name).c_str(), row.active,
                 row.p50, row.p95, row.maximum, row.busy, human_bytes(read).c_str(),
@@ -1644,7 +1644,7 @@ class Analysis {
             const auto& [device, operation] = key;
             const double service_p99 = op.service.quantile_ms(0.99);
             const double queue_p99 = op.queue.quantile_ms(0.99);
-            report_.overview.push_back(format(
+            report_.device_overview.push_back(format(
                 "Block %s %s (eBPF): %.0f requests, service avg %.2f / p99 <= %.2f ms, queue avg "
                 "%.2f / p99 <= %.2f ms over %.0f queued, %.0f errors.", device.c_str(),
                 operation.c_str(), op.service.count, op.service.average_ms(), service_p99,
@@ -1682,8 +1682,9 @@ class Analysis {
                      "(`smartctl -a`, `nvme error-log`) and its cabling/controller."});
             }
             // Pass-through commands are not data I/O: a SMART query that takes a
-            // few hundred milliseconds on a busy disk slows no application.
-            if (op.service.count < 10 || passthrough) continue;
+            // few hundred milliseconds on a busy disk slows no application, and
+            // neither does a slow discard (background space reclamation).
+            if (op.service.count < 10 || passthrough || operation == "discard") continue;
             if (service_p99 >= slow_service_ms(device)) {
                 slow[operation].push_back({device, service_p99, op.service.max_ms,
                                            op.service.count});
@@ -2440,6 +2441,8 @@ std::string render(const Report& report, Format format_kind) {
         }
         output << "],\"overview\":";
         strings(report.overview);
+        output << ",\"device_overview\":";
+        strings(report.device_overview);
         output << ",\"coverage\":";
         strings(report.coverage);
         output << "}\n";
@@ -2508,6 +2511,17 @@ std::string render(const Report& report, Format format_kind) {
                   "happening during collection, collect again while it is.");
     }
     out << '\n';
+    // The actionable findings in one line each, before any detail.
+    if (actionable > 1) {
+        for (std::size_t index = 0; index < report.findings.size(); ++index) {
+            const auto& finding = report.findings[index];
+            if (finding.severity == Severity::info) continue;
+            std::string level(to_string(finding.severity));
+            std::transform(level.begin(), level.end(), level.begin(), ::toupper);
+            bullet(format("%zu. [%s] ", index + 1, level.c_str()) + finding.title, 0);
+        }
+        out << '\n';
+    }
     if (!report.conclusions.empty()) {
         heading("Assessment", 2);
         for (const auto& line : report.conclusions) bullet(line, 0);
@@ -2535,15 +2549,32 @@ std::string render(const Report& report, Format format_kind) {
     }
     if (!report.timeline.empty()) {
         heading("Timeline (UTC)", 2);
-        for (std::size_t index = 0; index < report.timeline.size() && index < 25; ++index) {
-            const auto& entry = report.timeline[index];
+        // With more episodes than fit, show the most severe (then longest)
+        // ones in time order: the first 25 of a busy server are all from its
+        // first second.
+        std::vector<const TimelineEntry*> shown;
+        for (const auto& entry : report.timeline) shown.push_back(&entry);
+        if (shown.size() > 25) {
+            std::stable_sort(shown.begin(), shown.end(), [](const auto* a, const auto* b) {
+                if (a->peak_severity != b->peak_severity) {
+                    return a->peak_severity > b->peak_severity;
+                }
+                return a->count > b->count;
+            });
+            shown.resize(25);
+            std::stable_sort(shown.begin(), shown.end(),
+                             [](const auto* a, const auto* b) { return a->start < b->start; });
+        }
+        for (const auto* shown_entry : shown) {
+            const auto& entry = *shown_entry;
             std::string text = format("%s %-10s ", clock_of(entry.start).c_str(), entry.area.c_str()) +
                                entry.text + " (" + plural(entry.count, entry.unit);
             if (entry.peak_severity >= 0) text += format(", peak severity %.2f", entry.peak_severity);
             bullet(text + ")", 0);
         }
         if (report.timeline.size() > 25) {
-            bullet(format("... %zu more episodes", report.timeline.size() - 25), 0);
+            bullet(format("... %zu less severe episodes not shown (all are in --format json)",
+                          report.timeline.size() - 25), 0);
         }
         out << '\n';
     }
@@ -2551,6 +2582,13 @@ std::string render(const Report& report, Format format_kind) {
     for (const auto& line : report.overview) {
         if (line.starts_with("  ")) bullet(line.substr(2), 1);
         else bullet(line, 0);
+    }
+    if (report.device_overview.size() <= 24) {
+        for (const auto& line : report.device_overview) bullet(line, 0);
+    } else {
+        bullet(format("%zu per-device lines (latency, throughput and eBPF service and queue "
+                      "times) are in --format json; the findings name the devices that "
+                      "matter.", report.device_overview.size()), 0);
     }
     out << '\n';
     heading("Collection coverage", 2);
@@ -2563,6 +2601,80 @@ std::string render(const Report& report, Format format_kind) {
     out << '\n';
     paragraph("Thresholds in this summary are triage heuristics. The daemon's per-interval "
               "condition in events.jsonl is the authoritative classification.");
+    return out.str();
+}
+
+std::string render_cluster(const std::vector<Report>& reports) {
+    struct Shared {
+        Severity severity{Severity::info};
+        std::vector<std::string> hosts;
+    };
+    std::map<std::string, Shared> by_title;
+    std::vector<std::string> hosts;
+    for (const auto& report : reports) {
+        const auto found = report.system.find("hostname");
+        hosts.push_back(found == report.system.end() ? "unknown" : found->second);
+        for (const auto& finding : report.findings) {
+            if (finding.severity == Severity::info) continue;
+            auto& shared = by_title[finding.title];
+            if (shared.hosts.empty() || finding.severity < shared.severity) {
+                shared.severity = finding.severity;
+            }
+            if (shared.hosts.empty() || shared.hosts.back() != hosts.back()) {
+                shared.hosts.push_back(hosts.back());
+            }
+        }
+    }
+    std::vector<std::pair<std::string, const Shared*>> common;
+    std::map<std::string, std::vector<std::pair<Severity, std::string>>> own;
+    for (const auto& [title, shared] : by_title) {
+        // Two hosts can share a title by coincidence (both have an sdbi); a
+        // pattern of the cluster is on at least half of the hosts.
+        if (shared.hosts.size() >= 2 && shared.hosts.size() * 2 >= reports.size()) {
+            common.emplace_back(title, &shared);
+        } else {
+            for (const auto& host : shared.hosts) own[host].emplace_back(shared.severity, title);
+        }
+    }
+    std::stable_sort(common.begin(), common.end(), [](const auto& a, const auto& b) {
+        if (a.second->hosts.size() != b.second->hosts.size()) {
+            return a.second->hosts.size() > b.second->hosts.size();
+        }
+        return a.second->severity < b.second->severity;
+    });
+    std::ostringstream out;
+    auto level = [](Severity severity) {
+        std::string text(to_string(severity));
+        std::transform(text.begin(), text.end(), text.begin(), ::toupper);
+        return text;
+    };
+    const std::string heading = format("Graywatch cluster summary: %zu hosts", reports.size());
+    out << heading << '\n' << std::string(heading.size(), '=') << "\n\n"
+        << "Hosts: " << join(hosts, ", ") << "\n\n";
+    out << "Shared by several hosts\n-----------------------\n\n";
+    if (common.empty()) out << "None.\n";
+    for (const auto& [title, shared] : common) {
+        const std::string where =
+            shared->hosts.size() == reports.size()
+                ? "all hosts"
+                : format("%zu of %zu: ", shared->hosts.size(), reports.size()) +
+                      join(shared->hosts, ", ");
+        out << "* [" << level(shared->severity) << "] " << title << " (" << where << ")\n";
+    }
+    out << "\nPer host\n--------\n\n";
+    for (const auto& host : hosts) {
+        auto found = own.find(host);
+        if (found == own.end()) {
+            out << "* " << host << ": nothing beyond the shared findings\n";
+            continue;
+        }
+        std::stable_sort(found->second.begin(), found->second.end(),
+                         [](const auto& a, const auto& b) { return a.first < b.first; });
+        out << "* " << host << ":\n";
+        for (const auto& [severity, title] : found->second) {
+            out << "  * [" << level(severity) << "] " << title << "\n";
+        }
+    }
     return out.str();
 }
 

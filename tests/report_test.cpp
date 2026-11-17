@@ -551,6 +551,30 @@ void test_load_bundle() {
 
 }  // namespace
 
+// Findings several hosts share are listed once.
+void test_cluster() {
+    using graywatch::report::Report;
+    const auto host = [](const char* name, std::vector<Finding> findings) {
+        Report report;
+        report.system["hostname"] = name;
+        report.findings = std::move(findings);
+        return report;
+    };
+    const Finding peer{Severity::warning, "network", "TCP retransmits concentrated on 10.0.0.26",
+                       {}, {}};
+    const auto text = graywatch::report::render_cluster(
+        {host("fs1", {peer, {Severity::warning, "io", "Block device sdl: saturated", {}, {}}}),
+         host("fs2", {peer, {Severity::info, "cpu", "Threads in D state", {}, {}}})});
+    require(text.find("[WARNING] TCP retransmits concentrated on 10.0.0.26 (all hosts)") !=
+                std::string::npos,
+            "shared finding listed once");
+    require(text.find("* fs1:\n  * [WARNING] Block device sdl: saturated") != std::string::npos,
+            "own finding per host");
+    require(text.find("fs2: nothing beyond the shared findings") != std::string::npos &&
+                text.find("Threads in D state") == std::string::npos,
+            "info findings left out");
+}
+
 int main() {
     try {
         test_json();
@@ -567,6 +591,7 @@ int main() {
         test_render();
         test_load_bundle();
         test_history();
+        test_cluster();
     } catch (const std::exception& error) {
         std::cerr << "report_test: " << error.what() << '\n';
         return 1;
