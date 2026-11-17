@@ -14,6 +14,12 @@ struct BlockDeviceSample {
     unsigned int major{};
     unsigned int minor{};
     std::string model;
+    // A spinning disk, or a stacked device (md, device-mapper) with one
+    // underneath; their latency limits differ from solid-state devices.
+    bool rotational{};
+    // md or device-mapper: built on other block devices, so busy time and
+    // queue depth describe its members' work in parallel, not one device.
+    bool stacked{};
     std::uint64_t reads_completed{};
     std::uint64_t reads_merged{};
     std::uint64_t sectors_read{};
@@ -38,6 +44,8 @@ struct BlockDeviceInterval {
     unsigned int major{};
     unsigned int minor{};
     std::string model;
+    bool rotational{};
+    bool stacked{};
     double read_iops{};
     double write_iops{};
     double discard_iops{};

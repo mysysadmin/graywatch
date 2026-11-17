@@ -419,7 +419,8 @@ The report contains:
   unnamed operations a warning, and read/write/flush errors critical. Network
   errors (TCP input errors, a retransmit ratio of 1% or more, InfiniBand
   receive errors, link down) are called a likely contributor, and so are
-  retransmits of which one peer takes at least half (1,000 or more);
+  retransmits of which one peer takes at least half, or five times as many as
+  the next peer (1,000 or more);
   congestion and lower, spread-out retransmits are reported as context, since
   heavy transfers cause them;
 - a timeline of the degraded episodes;
@@ -649,10 +650,26 @@ PSI or eBPF. I/O health is classified without treating utilization alone as
 failure:
 
 - `healthy`: active and responsive, even when the device is fully busy
-- `saturated`: at least 90% busy with average queue depth of at least one
-- `congested`: substantial queueing or average operation latency of 20 ms+
-- `degraded`: average operation latency of 100 ms+, an absolute guardrail
+- `saturated`: at least 90% busy with average queue depth of at least one.
+  This is capacity evidence, not a fault: its severity stays at or below
+  0.70, under the 0.75 that requests an automatic collection
+- `congested`: average queue depth of 4+ (32+ on a hard disk) while at least
+  50% busy, or average operation latency of 20 ms+ (100 ms+ on a hard disk)
+- `degraded`: average operation latency of 100 ms+ (500 ms+ on a hard disk),
+  an absolute guardrail
 - `idle`: no completed operations in the interval
+
+Latency is the worst of the read, write and flush averages; discards are
+background work and are left out. A device is a hard disk when
+`queue/rotational` says so, or, for md and device-mapper devices, when one of
+their members is. md and device-mapper devices are judged by latency only,
+because their busy time and queue depth add up their members' parallel work.
+Events carry `rotational` and `stacked` in `device`. `graywatch-report`
+assesses events from older daemons again with lsblk's `ROTA`, and lists a
+device that was unhealthy in under a tenth of its active intervals (and never
+degraded) in the overview only. The eBPF device service time is slow from p99
+50 ms, or 500 ms on a hard disk, whose own command queue holds dozens of
+requests; pass-through commands such as SMART queries are not judged.
 
 Every entry in `/sys/block` is reported, including loop and device-mapper
 devices. A stacked device and the disk beneath it both appear, and comparing

@@ -35,6 +35,28 @@ bool counters_valid(const BlockDeviceSample& a, const BlockDeviceSample& b) {
            b.flush_time_ms >= a.flush_time_ms;
 }
 
+// Members of a stacked device (/sys/block/NAME/slaves), empty for a plain one.
+std::vector<std::filesystem::path> members(const std::filesystem::path& device) {
+    std::vector<std::filesystem::path> result;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(device / "slaves", error)) {
+        result.push_back(std::filesystem::canonical(entry.path(), error));
+        if (error) result.back() = entry.path();
+    }
+    return result;
+}
+
+// Rotational if the device says so or, for a stacked device, if any of its
+// members (at any depth) is: device-mapper reports 0 even on spinning disks.
+bool rotational(const std::filesystem::path& device, int depth = 0) {
+    if (read_text(device / "queue/rotational") == "1") return true;
+    if (depth >= 4) return false;
+    for (const auto& member : members(device)) {
+        if (rotational(member, depth + 1)) return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 BlockDeviceSample parse_block_stat(std::string name, unsigned int major,
@@ -82,6 +104,8 @@ std::optional<BlockDeviceInterval> calculate_block_interval(
         .major = current.major,
         .minor = current.minor,
         .model = current.model,
+        .rotational = current.rotational,
+        .stacked = current.stacked,
         .read_iops = static_cast<double>(reads) / elapsed_seconds,
         .write_iops = static_cast<double>(writes) / elapsed_seconds,
         .discard_iops = static_cast<double>(discards) / elapsed_seconds,
@@ -133,8 +157,11 @@ std::vector<BlockDeviceSample> read_block_devices(
             if (stat.empty()) {
                 continue;
             }
-            samples.push_back(parse_block_stat(
-                name, major, minor, read_text(entry.path() / "device/model"), stat));
+            auto sample = parse_block_stat(name, major, minor,
+                                           read_text(entry.path() / "device/model"), stat);
+            sample.stacked = !members(entry.path()).empty();
+            sample.rotational = rotational(entry.path());
+            samples.push_back(std::move(sample));
         } catch (const std::exception&) {
             continue;
         }

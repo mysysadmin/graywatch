@@ -1,5 +1,6 @@
 #include "graywatch/report.hpp"
 
+#include "graywatch/io_health.hpp"
 #include "graywatch/json.hpp"
 #include "graywatch/process.hpp"
 
@@ -365,6 +366,7 @@ struct DeviceInfo {
     std::string name;
     std::string type;
     std::set<std::string> backing;
+    std::optional<bool> rotational;  // lsblk ROTA: a boolean, or "1"/"0" in older lsblk
 };
 
 std::map<std::string, DeviceInfo> block_topology(const std::string& text) {
@@ -383,6 +385,12 @@ std::map<std::string, DeviceInfo> block_topology(const std::string& text) {
             auto& entry = info[kname];
             entry.name = node.string("name");
             entry.type = node.string("type");
+            const auto& rota = node["rota"];
+            if (rota.type() == Value::Type::boolean) {
+                entry.rotational = rota.boolean(false);
+            } else if (!rota.string().empty()) {
+                entry.rotational = rota.string() == "1";
+            }
             // lsblk prints stacked devices as children of the devices they use,
             // so the root of each path is a base device this one is built on.
             if (!ancestors.empty()) entry.backing.insert(ancestors.front());
@@ -605,6 +613,7 @@ class Analysis {
             else bpf_by_collector_[event.string("collector")].push_back(&event);
         }
         topology_ = block_topology(file("lsblk.json"));
+        reassess_io();
     }
 
     std::string system(const std::string& key, const std::string& fallback = "") const {
@@ -1016,10 +1025,70 @@ class Analysis {
         return label;
     }
 
+    // Archives from graywatchd before it knew the device type judged every
+    // device by solid-state limits. With lsblk's ROTA in the archive, assess
+    // those events again from their evidence, as the daemon does now.
+    void reassess_io() {
+        for (auto& event : events_) {
+            if (event.string("resource") != "io" || event["device"].contains("rotational")) {
+                continue;
+            }
+            const std::string& name = event["device"].string("name");
+            const auto found = topology_.find(name);
+            if (found == topology_.end() || !found->second.rotational) continue;
+            const auto& evidence = event["evidence"];
+            const BlockDeviceInterval device{
+                .name = name,
+                .major = 0,
+                .minor = 0,
+                .model = {},
+                .rotational = *found->second.rotational,
+                .stacked = found->second.type != "disk" && found->second.type != "part" &&
+                           found->second.type != "rom",
+                .read_iops = evidence.number("read_iops", 0.0),
+                .write_iops = evidence.number("write_iops", 0.0),
+                .discard_iops = evidence.number("discard_iops", 0.0),
+                .flush_iops = evidence.number("flush_iops", 0.0),
+                .read_bytes_per_second = evidence.number("read_bytes_per_second", 0.0),
+                .write_bytes_per_second = evidence.number("write_bytes_per_second", 0.0),
+                .average_read_latency_ms = evidence.number("average_read_latency_ms", 0.0),
+                .average_write_latency_ms = evidence.number("average_write_latency_ms", 0.0),
+                .average_discard_latency_ms = evidence.number("average_discard_latency_ms", 0.0),
+                .average_flush_latency_ms = evidence.number("average_flush_latency_ms", 0.0),
+                .busy_percent = evidence.number("busy_percent", 0.0),
+                .average_queue_depth = evidence.number("average_queue_depth", 0.0),
+                .io_in_progress = 0,
+            };
+            if (event.string("condition") == "idle" || !evidence.contains("read_iops")) continue;
+            const auto assessment = assess_io(device);
+            if (assessment.condition == IoCondition::idle) continue;
+            // Replace the element in place: by_resource_ points at it.
+            std::map<std::string, Value> members(event.members().begin(),
+                                                 event.members().end());
+            std::map<std::string, Value> facts(evidence.members().begin(),
+                                               evidence.members().end());
+            facts["assessment_reason"] = Value::make_string(std::string(assessment.reason));
+            facts["maximum_average_latency_ms"] =
+                Value::make_number(assessment.maximum_average_latency_ms);
+            members["evidence"] = Value::make_object(std::move(facts));
+            members["condition"] =
+                Value::make_string(std::string(to_string(assessment.condition)));
+            members["severity"] = Value::make_number(assessment.severity);
+            event = Value::make_object(std::move(members));
+            reassessed_io_ = true;
+        }
+    }
+
     void check_io() {
         std::map<std::string, std::vector<const Value*>> devices;
         for (const auto* event : by_resource_["io"]) {
             devices[(*event)["device"].string("name")].push_back(event);
+        }
+        if (reassessed_io_) {
+            report_.coverage.push_back(
+                "Block devices were assessed again with their type from lsblk (hard disk or "
+                "solid state), because this graywatchd judged every device by solid-state "
+                "limits.");
         }
         struct Row {
             std::vector<const Value*> bad;
@@ -1067,10 +1136,26 @@ class Analysis {
         }
         if (!idle.empty()) report_.overview.push_back("Idle devices: " + join(idle, ", ") + ".");
 
+        // A device unhealthy in a few intervals of a long window had bursts, not
+        // a problem: under a tenth of its active intervals and never degraded,
+        // it is listed in the overview only.
         std::vector<std::pair<std::string, const Row*>> ordered;
+        std::vector<std::string> bursts;
         for (const auto& [name, row] : unhealthy) {
+            const bool degraded = std::any_of(row.bad.begin(), row.bad.end(), [](const Value* e) {
+                return e->string("condition") == "degraded";
+            });
+            if (!degraded && row.bad.size() * 10 < row.active) {
+                bursts.push_back(name);
+                continue;
+            }
             ordered.emplace_back(name, &row);
             unhealthy_io_.insert(name);
+        }
+        if (!bursts.empty()) {
+            report_.overview.push_back(
+                format("%zu devices were unhealthy only in short bursts (under a tenth of their "
+                       "active intervals): ", bursts.size()) + join(bursts, ", ") + ".");
         }
         std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
             return a.second->bad.size() > b.second->bad.size();
@@ -1498,6 +1583,17 @@ class Analysis {
         }
     }
 
+    // Device service time (dispatch to completion) from which a device is slow.
+    // A hard disk with its own command queue (NCQ) keeps dozens of requests
+    // and reorders them, so under load a few hundred milliseconds at p99 is
+    // queueing inside the disk, not a fault.
+    double slow_service_ms(const std::string& device) const {
+        const auto found = topology_.find(device);
+        const bool rotational =
+            found != topology_.end() && found->second.rotational.value_or(false);
+        return rotational ? 500.0 : 50.0;
+    }
+
     void check_bpf_block() {
         struct Op {
             Histogram service;
@@ -1559,8 +1655,10 @@ class Analysis {
                     {"Check kernel.log for the matching error messages, the device's health "
                      "(`smartctl -a`, `nvme error-log`) and its cabling/controller."});
             }
-            if (op.service.count < 10) continue;
-            if (service_p99 >= 50.0) {
+            // Pass-through commands are not data I/O: a SMART query that takes a
+            // few hundred milliseconds on a busy disk slows no application.
+            if (op.service.count < 10 || passthrough) continue;
+            if (service_p99 >= slow_service_ms(device)) {
                 slow[operation].push_back({device, service_p99, op.service.max_ms,
                                            op.service.count});
             } else if (op.queue.count >= 10 && queue_p99 >= 20.0 && queue_p99 >= 10.0 * service_p99) {
@@ -1578,8 +1676,9 @@ class Analysis {
                                    "check its health, firmware and, for network block devices, "
                                    "the path to the target.";
         for (const auto& [operation, devices] : slow) {
-            const auto severity_of = [](const Slow& entry) {
-                return entry.p99 >= 500.0 ? Severity::critical : Severity::warning;
+            const auto severity_of = [this](const Slow& entry) {
+                return entry.p99 >= 10.0 * slow_service_ms(entry.device) ? Severity::critical
+                                                                         : Severity::warning;
             };
             if (devices.size() <= group_limit) {
                 for (const auto& entry : devices) {
@@ -1744,11 +1843,12 @@ class Analysis {
                                        peer_ranked[index].second));
         }
         details.push_back("By peer: " + join(peer_text, ", ") + ".");
-        // One peer taking most of many retransmits is a fault on that peer or
-        // the path to it, whatever the load: other peers carried the same
-        // traffic pattern without it.
+        // One peer taking most of many retransmits, or far more than any other
+        // peer, is a fault on that peer or the path to it, whatever the load:
+        // other peers carried the same traffic pattern without it.
         const auto& [top_peer, top_count] = peer_ranked.front();
-        if (peer_ranked.size() >= 2 && top_count >= 1000 && top_count >= 0.5 * total) {
+        if (peer_ranked.size() >= 2 && top_count >= 1000 &&
+            (top_count >= 0.5 * total || top_count >= 5.0 * peer_ranked[1].second)) {
             retransmit_peer_ = top_peer;
             details.insert(details.begin(),
                            format("%.0f%% of all retransmits went to %s.",
@@ -2215,6 +2315,7 @@ class Analysis {
     std::set<std::string> bpf_stuck_mounts_;
     std::string fuse_stuck_from_fusectl_;  // mount whose fusectl stall set fuse_stuck_
     std::string retransmit_peer_;          // peer taking most TCP retransmits, if one does
+    bool reassessed_io_{};                 // io events judged again with lsblk's device type
     bool psi_cpu_{};
     bool network_bad_{};
     bool network_load_{};      // congestion or retransmits, no errors
