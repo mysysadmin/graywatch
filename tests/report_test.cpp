@@ -561,9 +561,9 @@ void test_cluster() {
         return report;
     };
     const Finding peer{Severity::warning, "network", "TCP retransmits concentrated on 10.0.0.26",
-                       {}, {}};
-    auto fs1 = host("fs1", {peer, {Severity::warning, "io", "Block device sdl: saturated", {}, {}}});
-    auto fs2 = host("fs2", {peer, {Severity::info, "cpu", "Threads in D state", {}, {}}});
+                       {}, {}, {}};
+    auto fs1 = host("fs1", {peer, {Severity::warning, "io", "Block device sdl: saturated", {}, {}, {}}});
+    auto fs2 = host("fs2", {peer, {Severity::info, "cpu", "Threads in D state", {}, {}, {}}});
     fs1.settings = {{"nic ib0 mtu", "4092"}, {"hard disk scheduler", "mq-deadline"}};
     fs2.settings = {{"nic ib0 mtu", "2044"}, {"hard disk scheduler", "mq-deadline"}};
     const auto text = graywatch::report::render_cluster({fs1, fs2});
@@ -663,6 +663,45 @@ void test_platform() {
                 report.settings.at("hard disk scheduler") == "mq-deadline (most)",
             "settings recorded for the cluster summary");
     require_width(report);
+
+    // The same findings as pointers for programs: a stable kind, the subject
+    // and the numbers, next to (not instead of) the existing JSON.
+    using graywatch::report::Format;
+    const auto json = graywatch::json::parse(graywatch::report::render(report, Format::json));
+    require(json["findings"].array().size() == report.findings.size() &&
+                json["pointers"].array().size() == report.findings.size(),
+            "one pointer per finding, findings kept");
+    bool speed_found = false;
+    for (const auto& pointer : json["pointers"].array()) {
+        require(!pointer.string("kind").empty() && !pointer.string("kind").ends_with(".other"),
+                "every finding has a kind: " + pointer.string("title"));
+        if (pointer.string("kind") == "nic.speed_below_supported") {
+            speed_found = pointer["subjects"].array().front().string() == "ens1f0" &&
+                          pointer["values"].number("speed_mbps", 0.0) == 10000.0 &&
+                          pointer["values"].number("supported_mbps", 0.0) == 25000.0 &&
+                          pointer["sources"].array().front().string() == "ethtool-settings.txt";
+        }
+    }
+    require(speed_found, "NIC speed pointer carries subject, numbers and source");
+}
+
+// Pointers for every finding of the incident fixtures too.
+void test_pointer_kinds() {
+    using graywatch::report::Format;
+    for (const auto& report : {graywatch::report::analyze(bundle(true)),
+                               graywatch::report::analyze(bundle(false))}) {
+        const auto json = graywatch::json::parse(graywatch::report::render(report, Format::json));
+        for (const auto& pointer : json["pointers"].array()) {
+            require(!pointer.string("kind").ends_with(".other"),
+                    "finding without a pointer kind: " + pointer.string("title"));
+        }
+    }
+    auto files = bundle(false);
+    const auto cluster = graywatch::json::parse(graywatch::report::render_cluster(
+        {graywatch::report::analyze(files), graywatch::report::analyze(files)}, Format::json));
+    require(cluster["hosts"].array().size() == 2 &&
+                cluster["hosts"].array().front().string("hostname") == "nodea",
+            "cluster JSON lists the hosts with their pointers");
 }
 
 int main() {
@@ -683,6 +722,7 @@ int main() {
         test_history();
         test_cluster();
         test_platform();
+        test_pointer_kinds();
     } catch (const std::exception& error) {
         std::cerr << "report_test: " << error.what() << '\n';
         return 1;

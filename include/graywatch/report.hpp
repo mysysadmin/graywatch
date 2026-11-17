@@ -20,12 +20,26 @@ Files load_bundle(const std::filesystem::path& path);
 
 enum class Severity { critical, warning, info };
 
+// A finding as data for programs (agents): what it is about, the measured
+// numbers and the archive files that hold the evidence, without the prose.
+// `kind` is stable across versions (e.g. "nic.speed_below_supported");
+// `values` holds numbers (measurements and the limits they crossed) and
+// `labels` short strings such as an operation or a request type.
+struct Pointer {
+    std::string kind;
+    std::vector<std::string> subjects;  // devices, NICs, peers, mounts, cgroups
+    std::map<std::string, double> values;
+    std::map<std::string, std::string> labels;
+    std::vector<std::string> sources;   // archive members with the evidence
+};
+
 struct Finding {
     Severity severity{Severity::info};
     std::string area;
     std::string title;
     std::vector<std::string> details;
     std::vector<std::string> next_steps;
+    Pointer pointer;
 };
 
 struct TimelineEntry {
@@ -67,6 +81,6 @@ std::string_view to_string(Severity severity);
 // One summary for archives collected on several hosts in the same window: a
 // finding that at least half of the hosts share (same title) is listed once
 // with the hosts that have it, the rest per host. Info findings are left out.
-std::string render_cluster(const std::vector<Report>& reports);
+std::string render_cluster(const std::vector<Report>& reports, Format format = Format::text);
 
 }  // namespace graywatch::report

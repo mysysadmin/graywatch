@@ -715,6 +715,41 @@ std::string ethtool_value(const std::vector<std::string>& lines, std::string_vie
     return {};
 }
 
+// -- pointers ------------------------------------------------------------------
+
+std::vector<std::string> keys_of(const std::map<std::string, std::size_t>& map) {
+    std::vector<std::string> keys;
+    for (const auto& [key, value] : map) keys.push_back(key);
+    return keys;
+}
+
+std::map<std::string, double> with(std::map<std::string, double> values, const std::string& key,
+                                   double value) {
+    values[key] = value;
+    return values;
+}
+
+// "SCSI/SAS controller" -> "scsi_sas_controller", for stable pointer kinds.
+std::string slug(const std::string& text) {
+    std::string result;
+    for (const char c : text) {
+        if (std::isalnum(static_cast<unsigned char>(c))) {
+            result.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        } else if (!result.empty() && result.back() != '_') {
+            result.push_back('_');
+        }
+    }
+    while (!result.empty() && result.back() == '_') result.pop_back();
+    return result;
+}
+
+std::map<std::string, double> counters_of(const std::vector<std::pair<std::string, double>>& a,
+                                          const std::vector<std::pair<std::string, double>>& b) {
+    std::map<std::string, double> values(a.begin(), a.end());
+    values.insert(b.begin(), b.end());
+    return values;
+}
+
 class Analysis {
   public:
     explicit Analysis(const Files& files) : files_(files) {}
@@ -777,6 +812,7 @@ class Analysis {
             auto& finding = report_.findings[index];
             finding.severity = Severity::warning;
             finding.title = "FUSE mount " + path + ": background requests waiting";
+            finding.pointer.kind = "fuse.mount_background_waiting";
             auto& details = finding.details;
             if (details.size() > 1) details.pop_back();  // "The eBPF FUSE findings name ..."
             details.push_back("eBPF saw no synchronous request on this mount waiting that long, "
@@ -788,9 +824,10 @@ class Analysis {
     }
 
     void add(Severity severity, std::string area, std::string title,
-             std::vector<std::string> details, std::vector<std::string> steps) {
+             std::vector<std::string> details, std::vector<std::string> steps,
+             Pointer pointer = {}) {
         report_.findings.push_back({severity, std::move(area), std::move(title),
-                                    std::move(details), std::move(steps)});
+                                    std::move(details), std::move(steps), std::move(pointer)});
     }
 
     void timeline(const std::string& start, std::string area, std::string text,
@@ -910,7 +947,8 @@ class Analysis {
                  "back to reclaim, swap and OOM counters, and I/O health to block statistics; "
                  "both still work. System-wide stall percentages for CPU, memory and I/O are "
                  "missing."},
-                psi_help(psi));
+                psi_help(psi),
+            Pointer{"coverage.psi_unavailable", {}, {}, {{"psi_status", report_.psi_status}}, {"system.txt"}});
         }
     }
 
@@ -949,7 +987,8 @@ class Analysis {
                      format("%zu of %zu intervals were at or above 25%%.", heavy, stalls.size())},
                     {"Identify the CPU consumers listed under the top waiting threads and check "
                      "whether the node is oversubscribed or a cgroup has a CPU quota (cpu.max).",
-                     "Correlate with application latency for the same timestamps."});
+                     "Correlate with application latency for the same timestamps."},
+            Pointer{"cpu.contention", {}, {{"psi_some_mean_percent", average}, {"psi_some_p95_percent", p95}, {"psi_some_max_percent", maximum}, {"intervals_at_or_above_25_percent", static_cast<double>(heavy)}, {"intervals", static_cast<double>(stalls.size())}}, {}, {"events.jsonl"}});
             }
         } else {
             report_.overview.push_back("CPU PSI: " + report_.psi_status + ".");
@@ -1128,7 +1167,8 @@ class Analysis {
             add(worst_stuck >= 15 ? Severity::critical
                                   : (worst_stuck >= 2 * interval ? Severity::warning : Severity::info),
                 "cpu", "Threads in uninterruptible sleep (D state)", std::move(details),
-                std::move(steps));
+                std::move(steps),
+            Pointer{"cpu.d_state_threads", keys_of(blocked_categories_), {{"longest_seconds", static_cast<double>(worst_stuck)}}, {}, {"events.jsonl"}});
         }
 
         std::vector<std::pair<std::string, Waiter>> ranked(waits.begin(), waits.end());
@@ -1156,7 +1196,8 @@ class Analysis {
             add(Severity::warning, "cpu", "CPU starvation in task attribution (PSI unavailable)",
                 std::move(starved),
                 {"Check CPU utilisation (`mpstat -P ALL 1`) and cgroup CPU limits for these "
-                 "processes; the eBPF run-queue findings show which cgroups waited."});
+                 "processes; the eBPF run-queue findings show which cgroups waited."},
+            Pointer{"cpu.starvation", {}, {}, {}, {"events.jsonl"}});
         }
     }
 
@@ -1220,7 +1261,8 @@ class Analysis {
                 {"Find the killed process in kernel.log ('Killed process') and the cgroup that hit "
                  "its limit ('oom-kill:' line).",
                  "Check memory.max / memory.high of the affected cgroup and the workload's "
-                 "working-set size."});
+                 "working-set size."},
+            Pointer{"memory.oom", {}, {{"oom_kills", oom}, {"lowest_available_percent", min_available}}, {}, {"events.jsonl", "kernel.log"}});
         } else if (bad > 0) {
             details.push_back("Reasons: " + counts_text(reasons));
             add(bad >= 3 || reasons.contains("memory_stall_full") ? Severity::warning : Severity::info,
@@ -1231,7 +1273,8 @@ class Analysis {
                  "processes. Check for page-cache-heavy jobs and large dirty-page backlogs "
                  "(Dirty/Writeback in meminfo-*.txt).",
                  "If swap-in is non-zero, the working set does not fit in memory: identify the "
-                 "largest consumers (`ps aux --sort=-rss | head`)."});
+                 "largest consumers (`ps aux --sort=-rss | head`)."},
+            Pointer{"memory.pressure", {}, {{"intervals", static_cast<double>(bad)}, {"of_intervals", static_cast<double>(memory.size())}, {"direct_reclaim_stalls", reclaim}, {"compaction_stalls", compaction}, {"swap_in_pages", swap_in}, {"lowest_available_percent", min_available}}, {}, {"events.jsonl", "vmstat-initial.txt", "vmstat-final.txt"}});
         }
     }
 
@@ -1449,7 +1492,8 @@ class Analysis {
                         "busy %.0f%%, max average queue depth %.1f.", row->p50, row->p95,
                         row->maximum, row->busy, row->queue),
                  "Reasons: " + counts_text(reasons)},
-                std::move(steps));
+                std::move(steps),
+            Pointer{"block.device_unhealthy", {name}, {{"non_healthy_intervals", static_cast<double>(row->bad.size())}, {"active_intervals", static_cast<double>(row->active)}, {"degraded_intervals", static_cast<double>(degraded)}, {"latency_p50_ms", row->p50}, {"latency_p95_ms", row->p95}, {"latency_max_ms", row->maximum}, {"busy_max_percent", row->busy}, {"queue_depth_max", row->queue}}, {{"conditions", join(names, ",")}}, {"events.jsonl"}});
         }
         if (group.empty()) return;
         io_worst_ = group.worst_names(3);
@@ -1461,7 +1505,8 @@ class Analysis {
             group.steps({"Many devices degrading together usually means shared demand or a "
                          "shared component (controller, expander, the storage service's "
                          "workload), not failing disks. Devices far above the typical one are "
-                         "the ones to check first."}));
+                         "the ones to check first."}),
+            Pointer{"block.devices_unhealthy", group.worst_names(group.size()), {{"devices", static_cast<double>(group.size())}, {"active_devices", static_cast<double>(active_devices)}}, {{"conditions", group.labels()}}, {"events.jsonl"}});
     }
 
     // -- network -------------------------------------------------------------
@@ -1513,7 +1558,8 @@ class Analysis {
                     {"Inspect the affected connections with `ss -ti dst PEER` (retrans, rto) and "
                      "check NIC counters with `ip -s link` and `ethtool -S IFACE`.",
                      "Input errors usually mean checksum or malformed segments: check the NIC, "
-                     "cabling and MTU consistency."});
+                     "cabling and MTU consistency."},
+            Pointer{"tcp.retransmits_system", {}, {{"retransmitted_segments", retransmits}, {"segments_out", segments}, {"retransmit_percent", ratio}, {"input_errors", errors}, {"output_resets", resets}, {"intervals", static_cast<double>(bad)}, {"of_intervals", static_cast<double>(tcp.size())}}, {}, {"events.jsonl"}});
             }
         }
 
@@ -1560,13 +1606,15 @@ class Analysis {
                     std::move(details),
                     {"The port carried traffic before (or flapped) and is now down. Check "
                      "`ibstat`, the cable/transceiver and the switch port. If the port is "
-                     "intentionally unused, rerun with --ignore-ib-port " + name + "."});
+                     "intentionally unused, rerun with --ignore-ib-port " + name + "."},
+            Pointer{"infiniband.link_down", {name}, totals, {{"rate", rate}}, {"events.jsonl"}});
             } else if (conditions.contains("degraded")) {
                 network_bad_ = true;
                 add(Severity::warning, "network", "InfiniBand port " + name + " errors",
                     std::move(details),
                     {"Symbol and receive errors point at the physical link (cable, transceiver, "
-                     "port). Check `perfquery -x` on both ends and the switch-side counters."});
+                     "port). Check `perfquery -x` on both ends and the switch-side counters."},
+            Pointer{"infiniband.port_errors", {name}, totals, {{"rate", rate}}, {"events.jsonl"}});
             } else if (conditions.contains("congested")) {
                 const std::size_t busy = conditions["congested"];
                 // A handful of wait ticks is normal flow control, not congestion.
@@ -1577,7 +1625,8 @@ class Analysis {
                     std::move(details),
                     {"port_xmit_wait means the port had data to send but no credits from the "
                      "link partner: congestion in the fabric or a slow receiver. Check the switch "
-                     "for hotspots."});
+                     "for hotspots."},
+            Pointer{"infiniband.congested", {name}, with(totals, "congested_intervals", static_cast<double>(busy)), {{"rate", rate}}, {"events.jsonl"}});
             }
         }
         if (!inactive.empty()) {
@@ -1585,7 +1634,8 @@ class Analysis {
                 {join(inactive, ", ") + " down for the whole window and never carried traffic "
                  "since boot; not treated as a failure."},
                 {"If the application is configured to use one of these ports, that "
-                 "configuration (or the cabling) is the problem."});
+                 "configuration (or the cabling) is the problem."},
+            Pointer{"infiniband.ports_unused", inactive, {}, {}, {"events.jsonl"}});
         }
     }
 
@@ -1661,7 +1711,8 @@ class Analysis {
                 {"Check that the FUSE client daemon is running and responsive (its logs, CPU, "
                  "threads stuck in `D`) and whether it can reach its storage service.",
                  "`cat /proc/PID/stack` of a waiting process shows `request_wait_answer` and the "
-                 "operation's caller (e.g. fuse_create_open for CREATE)."});
+                 "operation's caller (e.g. fuse_create_open for CREATE)."},
+            Pointer{"fuse.mount_no_progress", {path}, {{"waiting_requests", evidence.number("waiting_requests", 0.0)}, {"unchanged_seconds", seconds}, {"stalled_intervals", static_cast<double>(stalled)}, {"readable_intervals", static_cast<double>(readable)}}, {}, {"events.jsonl"}});
         }
         if (!unreadable.empty()) {
             report_.coverage.push_back(
@@ -1732,6 +1783,7 @@ class Analysis {
         std::vector<std::string> slow;
         std::vector<std::string> stuck;
         std::vector<std::string> locks;
+        std::vector<std::string> slow_subjects, stuck_subjects, lock_subjects;
         std::vector<std::string> summary;
         bool slow_critical{};
         double worst_stuck{};
@@ -1746,6 +1798,7 @@ class Analysis {
             if (op.histogram.count > 0) summary.push_back(line);
             if (limits.lock_wait) {
                 if (op.oldest_ms >= 5000.0 || op.histogram.max_ms >= 5000.0) {
+                    lock_subjects.push_back(mount + " " + opcode);
                     locks.push_back(format("%s %s: longest wait %.1f s.", mount.c_str(),
                                            opcode.c_str(),
                                            std::max(op.oldest_ms, op.histogram.max_ms) / 1000.0));
@@ -1755,11 +1808,13 @@ class Analysis {
             if (op.histogram.count >= 1 &&
                 (p99 >= limits.slow_p99_ms || op.histogram.max_ms >= limits.slow_max_ms)) {
                 slow.push_back(line);
+                slow_subjects.push_back(mount + " " + opcode);
                 slow_critical = slow_critical || p99 >= 10.0 * limits.slow_p99_ms ||
                                 op.histogram.max_ms >= limits.stuck_ms;
             }
             if (op.oldest_ms >= limits.stuck_ms) {
                 bpf_stuck_mounts_.insert(mount);
+                stuck_subjects.push_back(mount + " " + opcode);
                 stuck.push_back(format(
                     "%s %s request outstanding for %.1f s at %s%s.", mount.c_str(), opcode.c_str(),
                     op.oldest_ms / 1000.0, clock_of(op.oldest_at).c_str(),
@@ -1786,13 +1841,15 @@ class Analysis {
                 {"The kernel sent these requests to the FUSE daemon and has not received a "
                  "reply. Check that the client daemon is running and responsive (its logs, CPU, "
                  "threads stuck in `D`) and whether it can reach its storage service.",
-                 "Compare with the network and InfiniBand findings for the same time."});
+                 "Compare with the network and InfiniBand findings for the same time."},
+            Pointer{"fuse.request_unanswered", stuck_subjects, {{"oldest_outstanding_ms", worst_stuck}}, {}, {"bpf-events.jsonl"}});
         }
         if (!locks.empty()) {
             add(Severity::info, "fuse", "Long FUSE lock waits", std::move(locks),
                 {"A blocking lock request waits until the current holder releases the lock, so "
                  "its duration is set by the application, not by the filesystem. Relevant only "
-                 "if the holder is known to have exited or released it."});
+                 "if the holder is known to have exited or released it."},
+            Pointer{"fuse.lock_wait", lock_subjects, {}, {}, {"bpf-events.jsonl"}});
         }
         if (!slow.empty()) {
             fuse_slow_ = true;
@@ -1806,7 +1863,8 @@ class Analysis {
                  "network path between them.",
                  "Metadata operations (LOOKUP, GETATTR, OPEN) being slow while READ/WRITE are "
                  "fast points at metadata servers; the reverse points at data servers or "
-                 "bandwidth."});
+                 "bandwidth."},
+            Pointer{"fuse.slow_operations", slow_subjects, {}, {}, {"bpf-events.jsonl"}});
         }
     }
 
@@ -1864,7 +1922,8 @@ class Analysis {
                             "smartd or a disk-health agent), not reads or writes: no data I/O "
                             "failed.", op.errors, operation.c_str())},
                     {"Usually a tool asking for a feature the device does not support. Real I/O "
-                     "errors appear as read/write errors here and in kernel.log."});
+                     "errors appear as read/write errors here and in kernel.log."},
+            Pointer{"block.passthrough_errors", {device}, {{"errors", op.errors}}, {{"operation", operation}}, {"bpf-events.jsonl"}});
             } else if (op.errors > 0 && unclassified) {
                 add(Severity::warning, "io",
                     format("Block device %s returned %.0f errors on %s requests", device.c_str(),
@@ -1873,14 +1932,16 @@ class Analysis {
                      "from older helpers this includes pass-through commands such as SMART "
                      "queries, which are not data I/O."},
                     {"Check kernel.log for I/O errors on this device. If there are none, these "
-                     "are most likely failed pass-through commands."});
+                     "are most likely failed pass-through commands."},
+            Pointer{"block.request_errors_unclassified", {device}, {{"errors", op.errors}}, {{"operation", operation}}, {"bpf-events.jsonl", "kernel.log"}});
             } else if (op.errors > 0) {
                 add(Severity::critical, "io",
                     format("Block device %s returned %.0f %s errors", device.c_str(), op.errors,
                            operation.c_str()),
                     {"Errors were reported at request completion by the device driver."},
                     {"Check kernel.log for the matching error messages, the device's health "
-                     "(`smartctl -a`, `nvme error-log`) and its cabling/controller."});
+                     "(`smartctl -a`, `nvme error-log`) and its cabling/controller."},
+            Pointer{"block.request_errors", {device}, {{"errors", op.errors}}, {{"operation", operation}}, {"bpf-events.jsonl", "kernel.log"}});
             }
             // Pass-through commands are not data I/O: a SMART query that takes a
             // few hundred milliseconds on a busy disk slows no application, and
@@ -1897,7 +1958,8 @@ class Analysis {
                     {"The device answers quickly but requests queue before dispatch: the "
                      "offered load exceeds the device's queue depth or the I/O scheduler is "
                      "throttling (check `/sys/block/DEV/queue/scheduler`, io.max/io.latency "
-                     "cgroup limits and the I/O sources with `iotop -o`)."});
+                     "cgroup limits and the I/O sources with `iotop -o`)."},
+            Pointer{"block.queue_wait", {device}, {{"queue_p99_ms", queue_p99}, {"service_p99_ms", service_p99}}, {{"operation", operation}}, {"bpf-events.jsonl"}});
             }
         }
         const std::string advice = "Slow service time is the device itself (or its transport): "
@@ -1916,7 +1978,8 @@ class Analysis {
                         {format("Device service time (dispatch to completion) p99 <= %.1f ms, "
                                 "max %.1f ms over %.0f requests.", entry.p99, entry.max,
                                 entry.count)},
-                        {advice});
+                        {advice},
+            Pointer{"block.slow_service", {entry.device}, {{"service_p99_ms", entry.p99}, {"service_max_ms", entry.max}, {"requests", entry.count}, {"limit_p99_ms", slow_service_ms(entry.device)}}, {{"operation", operation}}, {"bpf-events.jsonl"}});
                 }
                 continue;
             }
@@ -1933,7 +1996,8 @@ class Analysis {
                               "device (median of the maximum): %.1f ms.", "Worst:"),
                 group.steps({"Many devices slow together points at shared demand or a shared "
                              "component (controller, expander, the workload) rather than "
-                             "the devices themselves. " + advice}));
+                             "the devices themselves. " + advice}),
+            Pointer{"block.slow_service", group.worst_names(group.size()), {{"devices", static_cast<double>(devices.size())}}, {{"operation", operation}}, {"bpf-events.jsonl"}});
         }
     }
 
@@ -1996,7 +2060,8 @@ class Analysis {
              "was waiting in; the later frames show which subsystem called it (fuse_*, nfs_*, "
              "blk_*/submit_bio, xfs_/ext4_ journal, mutex/rwsem locks, or reclaim).",
              "A single long block matters more than many short ones; short blocks in "
-             "io_schedule are normal disk I/O."});
+             "io_schedule are normal disk I/O."},
+            Pointer{"cpu.blocked_stacks", {}, {{"longest_ms", worst}}, {}, {"bpf-events.jsonl"}});
     }
 
     void check_bpf_runqueue() {
@@ -2012,6 +2077,7 @@ class Analysis {
             return a.second->total_ms > b.second->total_ms;
         });
         std::vector<std::string> slow;
+        std::vector<std::string> slow_cgroups;
         for (std::size_t index = 0; index < ranked.size(); ++index) {
             const auto& [name, histogram] = ranked[index];
             const double p99 = histogram->quantile_ms(0.99);
@@ -2020,7 +2086,10 @@ class Analysis {
                 name.c_str(), histogram->count, histogram->average_ms(), p99, histogram->max_ms,
                 histogram->total_ms);
             if (index < 5) report_.overview.push_back("Run-queue " + line);
-            if (histogram->count >= 100 && p99 >= 10.0) slow.push_back(line);
+            if (histogram->count >= 100 && p99 >= 10.0) {
+                slow.push_back(line);
+                if (slow_cgroups.size() < 8) slow_cgroups.push_back(name);
+            }
         }
         if (!slow.empty()) {
             if (slow.size() > 8) slow.resize(8);
@@ -2029,7 +2098,8 @@ class Analysis {
                  "for one cgroup with low values elsewhere suggest a CPU quota (cpu.max) or low "
                  "cpu.weight; high values everywhere mean the node is CPU-saturated.",
                  "Check `cat /sys/fs/cgroup/<cgroup>/cpu.max cpu.stat` (nr_throttled, "
-                 "throttled_usec)."});
+                 "throttled_usec)."},
+            Pointer{"cpu.runqueue_latency", slow_cgroups, {}, {}, {"bpf-events.jsonl"}});
         }
     }
 
@@ -2066,7 +2136,9 @@ class Analysis {
         std::stable_sort(peer_ranked.begin(), peer_ranked.end(),
                          [](const auto& a, const auto& b) { return a.second > b.second; });
         std::vector<std::string> peer_text;
+        std::vector<std::string> top_peers;
         for (std::size_t index = 0; index < peer_ranked.size() && index < 5; ++index) {
+            top_peers.push_back(peer_ranked[index].first);
             peer_text.push_back(format("%s=%.0f", peer_ranked[index].first.c_str(),
                                        peer_ranked[index].second));
         }
@@ -2086,14 +2158,16 @@ class Analysis {
                 {"Check that host's NIC counters and the switch ports on the path to it; "
                  "`ss -ti dst " + top_peer + "` shows rto and retrans per connection.",
                  "If it is a client of this host, its own load (CPU, receive drops) can cause "
-                 "this too."});
+                 "this too."},
+            Pointer{"tcp.retransmits_concentrated", {top_peer}, {{"peer_retransmits", top_count}, {"total_retransmits", total}, {"next_peer_retransmits", peer_ranked[1].second}}, {}, {"bpf-events.jsonl"}});
             return;
         }
         add(network_bad_ || network_load_ || total >= 100 ? Severity::warning : Severity::info, "network",
             format("TCP retransmits on %zu connections", ranked.size()), std::move(details),
             {"Retransmits concentrated on one peer point at that peer or the path to it; spread "
              "across all peers points at this host's NIC, driver or uplink.",
-             "Check `ss -ti dst PEER` for rto and retrans, and `mtr PEER` for loss on the path."});
+             "Check `ss -ti dst PEER` for rto and retrans, and `mtr PEER` for loss on the path."},
+            Pointer{"tcp.retransmits", top_peers, {{"total_retransmits", total}, {"connections", static_cast<double>(ranked.size())}}, {}, {"bpf-events.jsonl"}});
     }
 
     void check_bpf_reclaim() {
@@ -2157,7 +2231,8 @@ class Analysis {
                         "check vm.min_free_kbytes, page-cache-heavy jobs and dirty-page backlog.");
         add(total >= 1000.0 || worst >= 100.0 ? Severity::warning : Severity::info, "memory",
             format("Memory reclaim stalls attributed to processes (%.0f ms total)", total),
-            std::move(details), std::move(steps));
+            std::move(details), std::move(steps),
+            Pointer{"memory.reclaim_stalls", {}, {{"total_ms", total}, {"longest_ms", worst}}, {}, {"bpf-events.jsonl"}});
     }
 
     // -- kernel log ----------------------------------------------------------
@@ -2356,7 +2431,8 @@ class Analysis {
              "least half of 30 intervals, and its end once it was healthy again. "
              "changes.jsonl in the archive has each period with the event that started it.",
              "When the problem began long before the collection, look at what changed then: "
-             "deployments, rebuilds, scrubs, new jobs or failing hardware."});
+             "deployments, rebuilds, scrubs, new jobs or failing hardware."},
+            Pointer{"history.problem_periods", {}, {{"periods", static_cast<double>(periods.size())}}, {}, {"changes.jsonl", "history-events.jsonl"}});
     }
 
     void check_kernel_log() {
@@ -2405,7 +2481,8 @@ class Analysis {
                         ", no link down)",
                     {"Most recent: " + recent.back().substr(0, 200)},
                     {"Links that come up without going down first are normal at boot or "
-                     "when an interface is started. A flap needs a link down."});
+                     "when an interface is started. A flap needs a link down."},
+            Pointer{"kernel_log.links_up", {}, {{"lines", static_cast<double>(recent.size())}}, {}, {"kernel.log"}});
                 continue;
             }
             if (!recent.empty()) {
@@ -2425,14 +2502,16 @@ class Analysis {
                 }
                 add(pattern.severity, "kernel log",
                     "Kernel log: " + pattern.name + " (" + plural(recent.size(), "line") + ")",
-                    std::move(details), std::move(steps));
+                    std::move(details), std::move(steps),
+            Pointer{"kernel_log." + slug(pattern.name), {}, {{"lines", static_cast<double>(recent.size())}, {"older_lines", static_cast<double>(old.size())}}, {{"when", "window"}}, {"kernel.log"}});
             } else {
                 add(Severity::info, "kernel log",
                     "Kernel log: earlier " + pattern.name + " (" + plural(old.size(), "line") +
                         ", before the window)",
                     {"Most recent: " + old.back().substr(0, 200)},
                     {"History only: relevant if the incident started at that time. " +
-                     pattern.advice});
+                     pattern.advice},
+            Pointer{"kernel_log." + slug(pattern.name), {}, {{"older_lines", static_cast<double>(old.size())}}, {{"when", "before_window"}}, {"kernel.log"}});
             }
         }
     }
@@ -2542,7 +2621,8 @@ class Analysis {
                      "take packets off the ring fast enough: check the ring size (`ethtool -g`), "
                      "interrupt placement and CPU load. Discards counted by the NIC's physical "
                      "port (`*_phy`) can also be the switch sending faster than the port drains.",
-                     "Compare with the switch port's counters for the same window."});
+                     "Compare with the switch port's counters for the same window."},
+            Pointer{faults.empty() ? "nic.drops" : "nic.errors", {nic}, counters_of(faults, losses), {}, {"links-initial.json", "links-final.json", "ethtool-stats-initial.txt", "ethtool-stats-final.txt"}});
                 nic_pointer_ = true;
             } else if (!losses.empty()) {
                 report_.overview.push_back("NIC " + nic + " drops: " + describe(losses) + ".");
@@ -2556,7 +2636,8 @@ class Analysis {
                     {"Received pause frames (rx_*pause*) mean the switch or the peer asked this "
                      "host to stop sending: congestion further along the path. Sent pause frames "
                      "(tx_*pause*) mean this NIC could not keep up with what arrived. Either "
-                     "stalls all traffic on the link, not only the busy flow."});
+                     "stalls all traffic on the link, not only the busy flow."},
+            Pointer{"nic.pause_frames", {nic}, counters_of(pauses, {}), {}, {"ethtool-stats-initial.txt", "ethtool-stats-final.txt"}});
             }
             // Link settings: negotiated below what the NIC supports, or half duplex.
             const auto found = link_settings.find(nic);
@@ -2576,21 +2657,27 @@ class Analysis {
                                  : "The link partner did not report its link modes."},
                     {"A lower negotiated speed than both ends support points at the cable or "
                      "transceiver; a partner advertising less points at the switch port's "
-                     "configuration. Intended if the network was built for this speed."});
+                     "configuration. Intended if the network was built for this speed."},
+            Pointer{"nic.speed_below_supported", {nic}, partner > 0 ? std::map<std::string, double>{{"speed_mbps", speed}, {"supported_mbps", supported}, {"partner_mbps", partner}} : std::map<std::string, double>{{"speed_mbps", speed}, {"supported_mbps", supported}}, {}, {"ethtool-settings.txt"}});
                 nic_pointer_ = true;
             }
             if (ethtool_value(lines, "Duplex") == "Half") {
                 add(Severity::warning, "network", "NIC " + nic + " runs at half duplex",
                     {"Half duplex on a switched network is almost always a failed "
                      "auto-negotiation."},
-                    {"Check auto-negotiation on both ends and the cable."});
+                    {"Check auto-negotiation on both ends and the cable."},
+            Pointer{"nic.half_duplex", {nic}, {}, {}, {"ethtool-settings.txt"}});
                 nic_pointer_ = true;
             }
         }
         // Ethernet and IPoIB MTUs are compared separately: they never share a path.
         std::map<bool, std::set<std::string>> mtus;
         std::vector<std::string> mtu_text;
+        std::vector<std::string> mtu_nics;
+        std::map<std::string, double> mtu_values;
         for (const auto& [nic, value] : mtu) {
+            mtu_nics.push_back(nic);
+            mtu_values[nic] = std::strtod(value.c_str(), nullptr);
             mtus[nic.starts_with("ib")].insert(value);
             mtu_text.push_back(nic + "=" + value);
             report_.settings["nic " + nic + " mtu"] = value;
@@ -2600,7 +2687,8 @@ class Analysis {
                 {"MTU per interface: " + join(mtu_text, ", ") + "."},
                 {"Fine for separate networks. On one path every hop (both hosts and the switch "
                  "ports) needs the same MTU; a mismatch shows as stalls on large transfers while "
-                 "small requests work. The cluster summary compares MTUs between hosts."});
+                 "small requests work. The cluster summary compares MTUs between hosts."},
+            Pointer{"nic.mtu_differs", mtu_nics, mtu_values, {}, {"platform.txt"}});
         }
         const auto [drops_before, squeeze_before] = softnet_drops(file("softnet-initial.txt"));
         const auto [drops_after, squeeze_after] = softnet_drops(file("softnet-final.txt"));
@@ -2610,7 +2698,8 @@ class Analysis {
                         "(/proc/net/softnet_stat); %.0f times packet processing ran out of "
                         "budget.", drops_after - drops_before, squeeze_after - squeeze_before)},
                 {"Raise net.core.netdev_max_backlog, and spread the NIC's interrupts and receive "
-                 "queues over more CPUs (RSS, irqbalance)."});
+                 "queues over more CPUs (RSS, irqbalance)."},
+            Pointer{"net.backlog_drops", {}, {{"dropped", drops_after - drops_before}, {"time_squeeze", squeeze_after - squeeze_before}}, {}, {"softnet-initial.txt", "softnet-final.txt"}});
             nic_pointer_ = true;
         }
         for (const auto& line : platform_lines(settings, "sysctl")) {
@@ -2625,7 +2714,8 @@ class Analysis {
             add(Severity::warning, "network", "Connection tracking table nearly full",
                 {format("%.0f of %.0f entries in use.", tracked, limit)},
                 {"When it fills, new connections are dropped. Raise "
-                 "net.netfilter.nf_conntrack_max or exempt storage traffic from tracking."});
+                 "net.netfilter.nf_conntrack_max or exempt storage traffic from tracking."},
+            Pointer{"net.conntrack_nearly_full", {}, {{"entries", tracked}, {"max", limit}}, {}, {"platform.txt"}});
         }
     }
 
@@ -2649,7 +2739,8 @@ class Analysis {
                 add(Severity::warning, "network",
                     "Bond " + bond + " has members down: " + join(down, ", "),
                     {"The bond carries all traffic on its remaining members."},
-                    {"Check the member's cable, transceiver and switch port."});
+                    {"Check the member's cable, transceiver and switch port."},
+            Pointer{"bond.members_down", down, {}, {{"bond", bond}}, {"bonding.txt"}});
                 nic_pointer_ = true;
             } else if (!failures.empty()) {
                 report_.overview.push_back("Bond " + bond + " link failures since boot: " +
@@ -2706,7 +2797,8 @@ class Analysis {
                             100.0 * *busiest / total, total / seconds)},
                     {"One CPU processing all of a NIC's interrupts caps its throughput and "
                      "drops packets under load. Check that irqbalance runs or that the queues' "
-                     "smp_affinity spreads them, and the queue count (`ethtool -l`)."});
+                     "smp_affinity spreads them, and the queue count (`ethtool -l`)."},
+            Pointer{"nic.interrupts_one_cpu", {nic}, {{"cpu", static_cast<double>(cpu)}, {"share_percent", 100.0 * *busiest / total}, {"interrupts_per_second", total / seconds}}, {}, {"interrupts-initial.txt", "interrupts-final.txt"}});
                 nic_pointer_ = true;
             }
             if (pci == pci_of.end() || pci->second.second < 0 || node_of.empty()) continue;
@@ -2723,14 +2815,15 @@ class Analysis {
                     {format("The NIC is attached to NUMA node %d; %.0f%% of its interrupts ran on "
                             "CPUs of other nodes.", pci->second.second, 100.0 * remote / total)},
                     {"Every packet then crosses the inter-socket link. Pin the NIC's interrupts "
-                     "(and ideally the service using it) to CPUs of its own node."});
+                     "(and ideally the service using it) to CPUs of its own node."},
+            Pointer{"nic.interrupts_remote_numa", {nic}, {{"nic_numa_node", static_cast<double>(pci->second.second)}, {"remote_percent", 100.0 * remote / total}}, {}, {"interrupts-initial.txt", "interrupts-final.txt", "platform.txt"}});
             }
         }
     }
 
     void check_pcie(const std::string& settings) {
-        std::vector<std::string> narrow;
-        std::vector<std::string> slow;
+        std::vector<std::string> narrow, narrow_devices;
+        std::vector<std::string> slow, slow_devices;
         for (const auto& line : platform_lines(settings, "pci")) {
             if (line.size() < 3) continue;
             auto fields = platform_fields(line);
@@ -2741,9 +2834,11 @@ class Analysis {
             const double max_speed = std::strtod(fields["max_speed"].c_str(), nullptr);
             if (width > 0 && max_width > width) {
                 narrow.push_back(format("%s: x%d of x%d", device.c_str(), width, max_width));
+                narrow_devices.push_back(line[2]);
             }
             if (speed > 0 && max_speed > speed) {
                 slow.push_back(format("%s: %.1f of %.1f GT/s", device.c_str(), speed, max_speed));
+                slow_devices.push_back(line[2]);
             }
         }
         if (!narrow.empty()) {
@@ -2751,13 +2846,15 @@ class Analysis {
                 narrow,
                 {"A link trained to fewer lanes than the card has caps its bandwidth. Usually "
                  "the slot (wired for fewer lanes), a riser, or a card not fully seated; check "
-                 "`lspci -vv` LnkCap against LnkSta and the board's slot documentation."});
+                 "`lspci -vv` LnkCap against LnkSta and the board's slot documentation."},
+            Pointer{"pcie.narrow_link", narrow_devices, {}, {}, {"platform.txt"}});
         }
         if (!slow.empty()) {
             add(Severity::info, "platform", "PCIe links slower than the devices support", slow,
                 {"Some devices lower the link speed when idle to save power; a link that stays "
                  "slow under load points at the slot, a riser or the BIOS PCIe generation "
-                 "setting."});
+                 "setting."},
+            Pointer{"pcie.slow_link", slow_devices, {}, {}, {"platform.txt"}});
         }
     }
 
@@ -2769,7 +2866,8 @@ class Analysis {
                 {format("%.0f thermal throttling events in %.0f s.", throttled, seconds)},
                 {"The CPUs ran slower than their rated speed because of temperature or power "
                  "limits. Check fans, airflow, the BIOS power profile and the BMC's sensor "
-                 "log."});
+                 "log."},
+            Pointer{"cpu.thermal_throttling", {}, {{"events", throttled}}, {}, {"throttle-initial.txt", "throttle-final.txt"}});
         }
         const auto [total_before, steal_before] = cpu_steal(file("stat-initial.txt"));
         const auto [total_after, steal_after] = cpu_steal(file("stat-final.txt"));
@@ -2782,7 +2880,8 @@ class Analysis {
                     {"Steal is time the virtual CPUs were runnable but the host ran something "
                      "else."},
                     {"The virtual machine's host is overcommitted: ask its operator for CPU "
-                     "reservations or move the VM."});
+                     "reservations or move the VM."},
+            Pointer{"cpu.steal", {}, {{"steal_percent", steal}}, {}, {"stat-initial.txt", "stat-final.txt"}});
             }
         }
         for (const auto& line : platform_lines(settings, "cpufreq")) {
@@ -2793,7 +2892,8 @@ class Analysis {
                 add(Severity::info, "platform", "CPU frequency governor is powersave",
                     {"Driver " + fields["driver"] + " with the powersave governor keeps the "
                      "CPUs at their lowest frequency."},
-                    {"Use the performance or schedutil governor on servers."});
+                    {"Use the performance or schedutil governor on servers."},
+            Pointer{"cpu.governor_powersave", {}, {}, {{"driver", fields["driver"]}}, {"platform.txt"}});
             }
         }
     }
@@ -2824,6 +2924,7 @@ class Analysis {
             return found == values.end() ? std::string("?") : found->second;
         };
         std::vector<std::string> odd;
+        std::vector<std::string> odd_devices;
         for (const auto& [kind, devices] : by_kind) {
             for (const auto& key : keys) {
                 std::map<std::string, std::size_t> votes;
@@ -2838,6 +2939,10 @@ class Analysis {
                 for (const auto& device : devices) {
                     if (field(device, key) != common->first) {
                         names.push_back(field(device, "name") + "=" + field(device, key));
+                        if (std::find(odd_devices.begin(), odd_devices.end(),
+                                      field(device, "name")) == odd_devices.end()) {
+                            odd_devices.push_back(field(device, "name"));
+                        }
                     }
                 }
                 odd.push_back(format("%s %s: %zu use %s; ", kind.c_str(), key.c_str(),
@@ -2850,7 +2955,8 @@ class Analysis {
                 std::move(odd),
                 {"Usually leftovers of manual tuning or of a replaced disk. The scheduler, "
                  "writeback throttling (wbt_lat_usec) and the disk's write cache change latency "
-                 "under load; a disk set up unlike its peers behaves unlike them."});
+                 "under load; a disk set up unlike its peers behaves unlike them."},
+            Pointer{"block.settings_differ", odd_devices, {}, {}, {"platform.txt"}});
         }
     }
 
@@ -3016,6 +3122,48 @@ Report analyze(const Files& files) {
     return Analysis(files).run();
 }
 
+namespace {
+
+void json_strings(std::ostringstream& output, const std::vector<std::string>& values) {
+    output << '[';
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        output << (index ? "," : "") << '"' << json::escape(values[index]) << '"';
+    }
+    output << ']';
+}
+
+// One finding as a pointer: severity, area, title (as in the findings) and
+// the structured data, without details and next steps.
+void json_pointer(std::ostringstream& output, const Finding& finding, std::size_t index) {
+    const auto& pointer = finding.pointer;
+    output << "{\"finding\":" << index << ",\"kind\":\""
+           << json::escape(pointer.kind.empty() ? finding.area + ".other" : pointer.kind)
+           << "\",\"severity\":\"" << to_string(finding.severity) << "\",\"area\":\""
+           << json::escape(finding.area) << "\",\"title\":\"" << json::escape(finding.title)
+           << "\",\"subjects\":";
+    json_strings(output, pointer.subjects);
+    output << ",\"values\":{";
+    bool first = true;
+    for (const auto& [key, value] : pointer.values) {
+        output << (first ? "" : ",") << '"' << json::escape(key) << "\":";
+        if (std::isfinite(value)) output << format("%.6g", value);
+        else output << "null";
+        first = false;
+    }
+    output << "},\"labels\":{";
+    first = true;
+    for (const auto& [key, value] : pointer.labels) {
+        output << (first ? "" : ",") << '"' << json::escape(key) << "\":\"" << json::escape(value)
+               << '"';
+        first = false;
+    }
+    output << "},\"sources\":";
+    json_strings(output, pointer.sources);
+    output << '}';
+}
+
+}  // namespace
+
 std::string render(const Report& report, Format format_kind) {
     if (format_kind == Format::json) {
         std::ostringstream output;
@@ -3063,7 +3211,12 @@ std::string render(const Report& report, Format format_kind) {
         strings(report.overview);
         output << ",\"device_overview\":";
         strings(report.device_overview);
-        output << ",\"settings\":{";
+        output << ",\"pointers\":[";
+        for (std::size_t index = 0; index < report.findings.size(); ++index) {
+            if (index) output << ',';
+            json_pointer(output, report.findings[index], index);
+        }
+        output << "],\"settings\":{";
         bool first_setting = true;
         for (const auto& [key, value] : report.settings) {
             output << (first_setting ? "" : ",") << '"' << json::escape(key) << "\":\""
@@ -3232,7 +3385,7 @@ std::string render(const Report& report, Format format_kind) {
     return out.str();
 }
 
-std::string render_cluster(const std::vector<Report>& reports) {
+std::string render_cluster(const std::vector<Report>& reports, Format format_kind) {
     struct Shared {
         Severity severity{Severity::info};
         std::vector<std::string> hosts;
@@ -3270,6 +3423,41 @@ std::string render_cluster(const std::vector<Report>& reports) {
         }
         return a.second->severity < b.second->severity;
     });
+    if (format_kind == Format::json) {
+        // Every host's pointers, the system identity, window and settings: what
+        // an agent needs to compare hosts without the prose.
+        std::ostringstream output;
+        output << "{\"schema_version\":1,\"hosts\":[";
+        for (std::size_t host = 0; host < reports.size(); ++host) {
+            const auto& report = reports[host];
+            output << (host ? "," : "") << "{\"hostname\":\"" << json::escape(hosts[host])
+                   << "\",\"window_start\":\"" << json::escape(report.window_start)
+                   << "\",\"window_end\":\"" << json::escape(report.window_end)
+                   << "\",\"pointers\":[";
+            for (std::size_t index = 0; index < report.findings.size(); ++index) {
+                if (index) output << ',';
+                json_pointer(output, report.findings[index], index);
+            }
+            output << "],\"settings\":{";
+            bool first = true;
+            for (const auto& [key, value] : report.settings) {
+                output << (first ? "" : ",") << '"' << json::escape(key) << "\":\""
+                       << json::escape(value) << '"';
+                first = false;
+            }
+            output << "}}";
+        }
+        output << "],\"shared\":[";
+        for (std::size_t index = 0; index < common.size(); ++index) {
+            const auto& [title, shared] = common[index];
+            output << (index ? "," : "") << "{\"title\":\"" << json::escape(title)
+                   << "\",\"severity\":\"" << to_string(shared->severity) << "\",\"hosts\":";
+            json_strings(output, shared->hosts);
+            output << '}';
+        }
+        output << "]}\n";
+        return output.str();
+    }
     std::ostringstream out;
     auto level = [](Severity severity) {
         std::string text(to_string(severity));

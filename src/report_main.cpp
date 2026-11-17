@@ -11,7 +11,8 @@ namespace {
 int usage() {
     std::cerr << "usage: graywatch-report ARCHIVE.tar[.gz]|DIRECTORY "
                  "[--format text|markdown|json] [--output PATH]\n"
-                 "       graywatch-report --cluster ARCHIVE|DIRECTORY... [--output PATH]\n";
+                 "       graywatch-report --cluster ARCHIVE|DIRECTORY... [--format text|json] "
+                 "[--output PATH]\n";
     return 2;
 }
 
@@ -32,7 +33,8 @@ bool write(const std::string& output, const std::string& text) {
 }
 
 // Archives from several hosts of one collection window: what they share.
-int cluster(const std::vector<std::string>& inputs, const std::string& output) {
+int cluster(const std::vector<std::string>& inputs, const std::string& output,
+            graywatch::report::Format format) {
     std::vector<graywatch::report::Report> reports;
     for (const auto& input : inputs) {
         try {
@@ -42,7 +44,7 @@ int cluster(const std::vector<std::string>& inputs, const std::string& output) {
             return 1;
         }
     }
-    return write(output, graywatch::report::render_cluster(reports)) ? 0 : 1;
+    return write(output, graywatch::report::render_cluster(reports, format)) ? 0 : 1;
 }
 
 int main(int argc, char** argv) {
@@ -76,7 +78,8 @@ int main(int argc, char** argv) {
     if (cluster_mode) {
         if (!input.empty()) inputs.insert(inputs.begin(), input);
         if (inputs.size() < 2) return usage();
-        return cluster(inputs, output);
+        if (format == graywatch::report::Format::markdown) return usage();
+        return cluster(inputs, output, format);
     }
     if (input.empty()) return usage();
     try {

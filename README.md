@@ -402,6 +402,23 @@ bin/graywatch-report graywatch-incident.tar.gz --format json
 A plain `.tar`, as some upload tools leave the archive after unpacking it,
 works too.
 
+`--format json` also carries `pointers`: one entry per finding, in the same
+order, for programs such as agents that do their own interpretation. Each has
+a stable `kind` (for example `block.device_unhealthy`,
+`tcp.retransmits_concentrated`, `nic.speed_below_supported`,
+`kernel_log.scsi_sas_controller`), the finding's `severity`, `area` and
+`title`, its `subjects` (devices, NICs, peers, mounts, cgroups), the measured
+numbers and the limits they crossed in `values`, short strings such as the
+request type in `labels`, and the archive files with the evidence in
+`sources`. The other keys of the JSON report are unchanged.
+
+```json
+{"finding": 1, "kind": "nic.speed_below_supported", "severity": "warning",
+ "area": "network", "title": "NIC ens7f1 runs at 1000 Mb/s of 10000 Mb/s supported",
+ "subjects": ["ens7f1"], "values": {"speed_mbps": 1000, "supported_mbps": 10000},
+ "labels": {}, "sources": ["ethtool-settings.txt"]}
+```
+
 For archives collected on several hosts in the same window (all storage
 servers, say), `--cluster` lists the warning and critical findings that at
 least half of the hosts share once, the platform settings that differ between
@@ -410,7 +427,11 @@ the rest per host:
 
 ```sh
 bin/graywatch-report --cluster graywatch-support-fs*.tar.gz
+bin/graywatch-report --cluster graywatch-support-fs*.tar.gz --format json
 ```
+
+The JSON form lists every host with its window, `pointers` and `settings`, and
+the findings shared by at least half of the hosts under `shared`.
 
 The report contains:
 
