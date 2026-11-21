@@ -65,6 +65,22 @@ std::string io_event(int second, const std::string& name, double latency) {
            R"("busy_percent":10.0,"average_queue_depth":0.1}})";
 }
 
+// An event as written by a recorder without the rotational/stacked flags,
+// with the full sysfs evidence and the condition the SSD limits gave.
+std::string legacy_io_event(int second, const std::string& name, const char* condition,
+                            double latency, double busy, double queue) {
+    return R"({"schema_version":1,"resource":"io","timestamp":")" + ts(second) +
+           R"(","condition":")" + condition + R"(","severity":0.5,"interval_seconds":1.0,)"
+           R"("device":{"name":")" + name + R"("},"evidence":{"assessment_reason":"queueing",)"
+           R"("maximum_average_latency_ms":)" + std::to_string(latency) +
+           R"(,"read_iops":80.0,"write_iops":0.0,"discard_iops":0.0,"flush_iops":0.0,)"
+           R"("average_read_latency_ms":)" + std::to_string(latency) +
+           R"(,"average_write_latency_ms":0.0,"average_discard_latency_ms":0.0,)"
+           R"("average_flush_latency_ms":0.0,"read_bytes_per_second":4096.0,)"
+           R"("write_bytes_per_second":0.0,"busy_percent":)" + std::to_string(busy) +
+           R"(,"average_queue_depth":)" + std::to_string(queue) + "}}";
+}
+
 std::string memory_event(int second, bool oom) {
     return R"({"resource":"memory","timestamp":")" + ts(second) + R"(","condition":")" +
            (oom ? "degraded" : "healthy") + R"(","severity":)" + (oom ? "0.95" : "0.01") +
@@ -175,7 +191,9 @@ void test_topology() {
     require(devices.size() == 1, "one device finding");
     require(devices[0]->title.find("dm-0 (vg-data) on nvme0n1") != std::string::npos,
             "stacked device label: " + devices[0]->title);
-    require(any_contains(devices[0]->next_steps, "stacking layer"), "stacking layer hint");
+    require(any_contains(devices[0]->next_steps,
+                         "dm-0 was slow while its underlying device(s) nvme0n1"),
+            "stacking layer hint names the device");
 }
 
 void test_ports_and_conclusions() {
@@ -395,12 +413,24 @@ void test_device_grouping() {
                std::to_string(100 + disk) + R"(,"histogram_us":{"65536":100}},)"
                R"("queue":{"count":100,"total_ms":1,"max_ms":0.1,"histogram_us":{"16":100}}})" "\n";
     }
+    // Two more disks with a single slow second: too brief to count.
+    for (const std::string name : {"sdn", "sdo"}) {
+        for (int second = 1; second <= 40; ++second) {
+            std::string line = io_event(second, name, second == 20 ? 50.0 : 5.0);
+            if (second == 20) line.replace(line.find("healthy"), 7, "congested");
+            events += line + "\n";
+        }
+    }
     files["events.jsonl"] = events;
     files["bpf-events.jsonl"] = bpf;
     const auto report = graywatch::report::analyze(files);
-    const auto* group = find(report, "12 of 13 active block devices non-healthy");
+    const auto* group = find(report, "12 of 15 active block devices non-healthy");
     require(group && group->severity == Severity::critical, "devices grouped above the limit");
     require(find(report, "Block device sdb:") == nullptr, "no per-device findings when grouped");
+    require(any_contains(group->details, "2 more device(s) had only brief episodes") &&
+                !any_contains(group->details, "All: sdb, sdc, sdd, sde, sdf, sdg, sdh, sdi, sdj, "
+                                              "sdk, sdl, sdm, sdn"),
+            "brief devices summarized, not counted");
     require(any_contains(group->details, "Worst by p95") &&
                 any_contains(group->details, "  sdm: p50"),
             "worst device listed first");
@@ -408,6 +438,71 @@ void test_device_grouping() {
     require(flush && flush->severity == Severity::warning, "eBPF slow devices grouped");
     require(find(report, "Device sdb is slow") == nullptr, "no per-device eBPF findings");
     require_width(report);
+}
+
+void test_device_types() {
+    auto files = bundle(false);
+    files["lsblk.json"] =
+        R"({"blockdevices":[{"name":"nvme0n1","kname":"nvme0n1","type":"disk","rota":false},)"
+        R"({"name":"sda","kname":"sda","type":"disk","rota":"0","children":[)"
+        R"({"name":"md0","kname":"md0","type":"raid1","rota":"0"}]},)"
+        R"({"name":"sdb","kname":"sdb","type":"disk","rota":"0","children":[)"
+        R"({"name":"md0","kname":"md0","type":"raid1","rota":"0"}]},)"
+        R"({"name":"sdc","kname":"sdc","type":"disk","rota":true},)"
+        R"({"name":"sdd","kname":"sdd","type":"disk","rota":true}]})";
+    std::string events = files["events.jsonl"];
+    std::string bpf =
+        R"({"event_type":"bpf_status","collectors":[{"name":"block","enabled":true}]})" "\n";
+    for (int second = 1; second <= 40; ++second) {
+        // Loaded HDD: congested by SSD limits, healthy by HDD limits.
+        events += legacy_io_event(second, "sdc", "congested", 25.0, 95.0, 3.0) + "\n";
+        // Failing HDD: degraded either way.
+        events += legacy_io_event(second, "sdd", "degraded", second % 4 ? 30.0 : 400.0, 90.0,
+                                  6.0) + "\n";
+        // md0 counted 100% busy by md's accounting, members healthy.
+        events += legacy_io_event(second, "md0", "saturated", 4.6, 100.0, 1.03) + "\n";
+        events += legacy_io_event(second, "sda", "healthy", 1.2, 15.0, 0.1) + "\n";
+        events += legacy_io_event(second, "sdb", "healthy", 1.2, 15.0, 0.1) + "\n";
+    }
+    const auto block = [&](const std::string& device, const std::string& operation,
+                           const std::string& bucket, int count) {
+        bpf += R"({"event_type":"bpf_interval","collector":"block","timestamp":")" + ts(20) +
+               R"(","device":")" + device + R"(","operation":")" + operation +
+               R"(","errors":0,"direct_issue":0,"service":{"count":)" + std::to_string(count) +
+               R"(,"total_ms":3000,"max_ms":200,"histogram_us":{")" + bucket + R"(":)" +
+               std::to_string(count) + R"(}},"queue":{"count":)" + std::to_string(count) +
+               R"(,"total_ms":1,"max_ms":0.1,"histogram_us":{"16":)" + std::to_string(count) +
+               "}}}\n";
+    };
+    block("sdc", "read", "131072", 100);     // p99 <= 131 ms: normal for an HDD
+    block("sdd", "read", "524288", 100);     // p99 <= 524 ms: slow even for an HDD
+    block("sdd", "write", "262144", 100);    // p99 <= 262 ms: loaded HDD, not flagged
+    block("nvme0n1", "read", "131072", 100);  // p99 <= 131 ms: slow for an SSD
+    block("sdc", "drv_in", "262144", 44);    // SMART polling
+    files["events.jsonl"] = events;
+    files["bpf-events.jsonl"] = bpf;
+    const auto report = graywatch::report::analyze(files);
+    std::vector<std::string> titles;
+    for (const auto& finding : report.findings) titles.push_back(finding.title);
+    const std::string all = "findings: " + [&] {
+        std::string text;
+        for (const auto& title : titles) text += title + " | ";
+        return text;
+    }();
+    require(find(report, "Block device sdd") != nullptr, "failing HDD reported; " + all);
+    require(find(report, "Block device sdc") == nullptr, "loaded HDD not reported; " + all);
+    require(find(report, "Block device md0") == nullptr, "busy md0 not reported; " + all);
+    require(find(report, "Device sdd is slow to service read") != nullptr, "slow HDD; " + all);
+    require(find(report, "Device sdc is slow") == nullptr, "normal HDD service time; " + all);
+    require(find(report, "Device sdd is slow to service write") == nullptr,
+            "HDD p99 <= 262 ms not flagged; " + all);
+    const auto* hdd = find(report, "Device sdd is slow to service read");
+    require(hdd && hdd->severity == Severity::warning, "HDD p99 <= 524 ms is a warning; " + all);
+    require(find(report, "Device nvme0n1 is slow to service read") != nullptr, "slow SSD; " + all);
+    require(find(report, "drv_in") == nullptr, "pass-through latency ignored; " + all);
+    for (const auto& finding : report.findings) {
+        require(!any_contains(finding.next_steps, "stacking layer"), "no stacking hint; " + all);
+    }
 }
 
 void test_render() {
@@ -489,6 +584,7 @@ int main() {
         test_incident_triage();
         test_daemon_fuse();
         test_device_grouping();
+        test_device_types();
         test_render();
         test_load_bundle();
         test_history();

@@ -82,6 +82,8 @@ std::optional<BlockDeviceInterval> calculate_block_interval(
         .major = current.major,
         .minor = current.minor,
         .model = current.model,
+        .rotational = current.rotational,
+        .stacked = current.stacked,
         .read_iops = static_cast<double>(reads) / elapsed_seconds,
         .write_iops = static_cast<double>(writes) / elapsed_seconds,
         .discard_iops = static_cast<double>(discards) / elapsed_seconds,
@@ -133,8 +135,11 @@ std::vector<BlockDeviceSample> read_block_devices(
             if (stat.empty()) {
                 continue;
             }
-            samples.push_back(parse_block_stat(
-                name, major, minor, read_text(entry.path() / "device/model"), stat));
+            auto sample = parse_block_stat(
+                name, major, minor, read_text(entry.path() / "device/model"), stat);
+            sample.rotational = read_text(entry.path() / "queue/rotational") == "1";
+            sample.stacked = !std::filesystem::exists(entry.path() / "device", error);
+            samples.push_back(std::move(sample));
         } catch (const std::exception&) {
             continue;
         }

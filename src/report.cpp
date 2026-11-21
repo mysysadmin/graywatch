@@ -1,5 +1,6 @@
 #include "graywatch/report.hpp"
 
+#include "graywatch/io_health.hpp"
 #include "graywatch/json.hpp"
 #include "graywatch/process.hpp"
 
@@ -341,7 +342,17 @@ struct DeviceInfo {
     std::string name;
     std::string type;
     std::set<std::string> backing;
+    bool rotational{};
+    // md, device-mapper, loop: anything lsblk does not call a disk.
+    bool stacked{};
 };
+
+// lsblk prints rota as a JSON boolean (util-linux >= 2.33) or as "0"/"1".
+bool lsblk_flag(const Value& value) {
+    if (value.type() == Value::Type::boolean) return value.boolean();
+    if (value.type() == Value::Type::number) return value.number() != 0.0;
+    return value.string() == "1";
+}
 
 std::map<std::string, DeviceInfo> block_topology(const std::string& text) {
     std::map<std::string, DeviceInfo> info;
@@ -359,6 +370,9 @@ std::map<std::string, DeviceInfo> block_topology(const std::string& text) {
             auto& entry = info[kname];
             entry.name = node.string("name");
             entry.type = node.string("type");
+            entry.rotational = lsblk_flag(node["rota"]);
+            entry.stacked = !entry.type.empty() && entry.type != "disk" &&
+                            entry.type != "part" && entry.type != "rom";
             // lsblk prints stacked devices as children of the devices they use,
             // so the root of each path is a base device this one is built on.
             if (!ancestors.empty()) entry.backing.insert(ancestors.front());
@@ -575,14 +589,69 @@ class Analysis {
             }
             report_.system[key] = value;
         }
+        topology_ = block_topology(file("lsblk.json"));
         events_ = parse_lines(file("events.jsonl"), invalid_lines_);
+        for (auto& event : events_) {
+            if (event.string("resource") == "io") reassess_io(event);
+        }
         for (const auto& event : events_) by_resource_[event.string("resource")].push_back(&event);
         bpf_events_ = parse_lines(file("bpf-events.jsonl"), invalid_bpf_lines_);
         for (const auto& event : bpf_events_) {
             if (event.string("event_type") == "bpf_status") bpf_status_ = &event;
             else bpf_by_collector_[event.string("collector")].push_back(&event);
         }
-        topology_ = block_topology(file("lsblk.json"));
+    }
+
+    // Archives from recorders before the rotational/stacked device flags were
+    // classified with solid-state limits. Re-run the classifier with the device
+    // type from lsblk so spinning disks and md/dm devices are judged by their
+    // own limits.
+    void reassess_io(Value& event) {
+        const auto& device = event["device"];
+        const std::string& name = device.string("name");
+        bool rotational = device.boolean("rotational", false);
+        bool stacked = device.boolean("stacked", false);
+        if (!device.contains("rotational")) {
+            const auto found = topology_.find(name);
+            if (found == topology_.end()) return;
+            rotational = found->second.rotational;
+            stacked = found->second.stacked;
+        }
+        device_kind_[name] = {rotational, stacked};
+        if (device.contains("rotational") || (!rotational && !stacked)) return;
+        const auto& evidence = event["evidence"];
+        if (!evidence.contains("read_iops")) return;  // not enough evidence to re-run
+        const BlockDeviceInterval interval{
+            .name = name,
+            .model = {},
+            .rotational = rotational,
+            .stacked = stacked,
+            .read_iops = evidence.number("read_iops", 0.0),
+            .write_iops = evidence.number("write_iops", 0.0),
+            .discard_iops = evidence.number("discard_iops", 0.0),
+            .flush_iops = evidence.number("flush_iops", 0.0),
+            .average_read_latency_ms = evidence.number("average_read_latency_ms", 0.0),
+            .average_write_latency_ms = evidence.number("average_write_latency_ms", 0.0),
+            .average_discard_latency_ms = evidence.number("average_discard_latency_ms", 0.0),
+            .average_flush_latency_ms = evidence.number("average_flush_latency_ms", 0.0),
+            .busy_percent = evidence.number("busy_percent", 0.0),
+            .average_queue_depth = evidence.number("average_queue_depth", 0.0),
+        };
+        const IoAssessment assessment = assess_io(interval);
+        std::map<std::string, Value> members(event.members().begin(), event.members().end());
+        std::map<std::string, Value> facts(evidence.members().begin(), evidence.members().end());
+        facts["assessment_reason"] = Value::make_string(std::string(assessment.reason));
+        members["evidence"] = Value::make_object(std::move(facts));
+        members["condition"] = Value::make_string(std::string(to_string(assessment.condition)));
+        members["severity"] = Value::make_number(assessment.severity);
+        event = Value::make_object(std::move(members));
+    }
+
+    bool rotational(const std::string& device) const {
+        const auto found = device_kind_.find(device);
+        if (found != device_kind_.end()) return found->second.first;
+        const auto info = topology_.find(device);
+        return info != topology_.end() && info->second.rotational;
     }
 
     std::string system(const std::string& key, const std::string& fallback = "") const {
@@ -1055,6 +1124,7 @@ class Analysis {
         });
         const std::size_t active_devices = devices.size() - idle.size();
         DeviceGroup group;
+        std::vector<std::string> brief;
         for (const auto& [name, row] : ordered) {
             std::map<std::string, std::size_t> conditions;
             std::map<std::string, std::size_t> reasons;
@@ -1074,11 +1144,17 @@ class Analysis {
                     backing.push_back(device);
                     all_healthy &= !unhealthy.contains(device);
                 }
-                if (!backing.empty() && all_healthy) {
-                    steps.push_back("The underlying device(s) " + join(backing, ", ") +
+                // Only latency says where the delay is added; busy time and
+                // queue depth of a stacked device just mirror its members.
+                const bool slow = reasons.contains("absolute_latency") ||
+                                  reasons.contains("elevated_latency");
+                if (!backing.empty() && all_healthy && slow) {
+                    steps.push_back(name + " was slow while its underlying device(s) " +
+                                    join(backing, ", ") +
                                     " stayed healthy, so the delay is added in the stacking layer "
                                     "(device-mapper, LVM, multipath, dm-crypt, RAID). Inspect "
-                                    "`dmsetup table` and `dmsetup status`.");
+                                    "`dmsetup table` and `dmsetup status` (`mdadm --detail` for "
+                                    "md).");
                 } else if (!backing.empty()) {
                     steps.push_back("Backing device(s) " + join(backing, ", ") +
                                     " were also unhealthy; start with the physical device.");
@@ -1096,10 +1172,19 @@ class Analysis {
             }
             std::vector<std::string> names;
             for (const auto& [condition, count] : conditions) names.push_back(condition);
+            // A few slow seconds in a long recording are normal for a loaded
+            // device; it takes a sustained share of the window to matter.
+            const bool sustained = row->bad.size() >= 3 &&
+                                   static_cast<double>(row->bad.size()) >=
+                                       0.05 * static_cast<double>(row->active);
             const Severity severity =
                 degraded >= 3 ? Severity::critical
-                              : (degraded > 0 || row->bad.size() >= 3 ? Severity::warning
-                                                                       : Severity::info);
+                              : (degraded > 0 || sustained ? Severity::warning : Severity::info);
+            if (ordered.size() > group_limit && severity == Severity::info) {
+                brief.push_back(name);
+                unhealthy_io_.erase(name);
+                continue;
+            }
             if (ordered.size() > group_limit) {
                 group.add(name, severity, row->p95, names, steps,
                           format("%s: p50 %.2f / p95 %.2f / max %.2f ms, busy max %.0f%%, queue "
@@ -1117,13 +1202,32 @@ class Analysis {
                  "Reasons: " + counts_text(reasons)},
                 std::move(steps));
         }
-        if (group.empty()) return;
+        std::sort(brief.begin(), brief.end(), [](const std::string& a, const std::string& b) {
+            return a.size() != b.size() ? a.size() < b.size() : a < b;
+        });
+        const std::string brief_line =
+            brief.empty() ? std::string()
+                          : format("%zu more device(s) had only brief episodes (under 5%% of "
+                                   "their active intervals, none degraded): ", brief.size()) +
+                                join(brief, ", ") + ".";
+        if (group.empty()) {
+            if (!brief.empty()) {
+                add(Severity::info, "io",
+                    format("%zu block devices had brief latency episodes", brief.size()),
+                    {brief_line},
+                    {"Short episodes on many devices at once are usually bursts of demand. "
+                     "Compare their times in the timeline with the workload."});
+            }
+            return;
+        }
         io_worst_ = group.worst_names(3);
+        auto details = group.details("Average latency per interval of the typical device "
+                                     "(median): p95 %.2f ms.", "Worst by p95 latency:");
+        if (!brief.empty()) details.push_back(brief_line);
         add(group.severity(), "io",
             format("%zu of %zu active block devices non-healthy: ", group.size(),
                    active_devices) + group.labels(),
-            group.details("Average latency per interval of the typical device (median): p95 %.2f "
-                          "ms.", "Worst by p95 latency:"),
+            std::move(details),
             group.steps({"Many devices degrading together usually means shared demand or a "
                          "shared component (controller, expander, the storage service's "
                          "workload), not failing disks. Devices far above the typical one are "
@@ -1461,7 +1565,7 @@ class Analysis {
         };
         struct Slow {
             std::string device;
-            double p99{}, max{}, count{};
+            double p99{}, max{}, count{}, critical_ms{};
         };
         std::map<std::string, std::vector<Slow>> slow;  // by operation
         std::map<std::pair<std::string, std::string>, Op> operations;
@@ -1513,10 +1617,16 @@ class Analysis {
                     {"Check kernel.log for the matching error messages, the device's health "
                      "(`smartctl -a`, `nvme error-log`) and its cabling/controller."});
             }
-            if (op.service.count < 10) continue;
-            if (service_p99 >= 50.0) {
+            // Pass-through commands (SMART polling) are slow by design and
+            // carry no data; their latency is not the device's I/O latency.
+            if (op.service.count < 10 || passthrough) continue;
+            // Spinning disks reorder up to 32 requests internally (NCQ), so
+            // a p99 of 100-260 ms is their normal behaviour under load. The
+            // histogram buckets double, so 300 ms flags p99 buckets >= 524 ms.
+            const bool spinning = rotational(device);
+            if (service_p99 >= (spinning ? 300.0 : 50.0)) {
                 slow[operation].push_back({device, service_p99, op.service.max_ms,
-                                           op.service.count});
+                                           op.service.count, spinning ? 1000.0 : 500.0});
             } else if (op.queue.count >= 10 && queue_p99 >= 20.0 && queue_p99 >= 10.0 * service_p99) {
                 add(Severity::warning, "io",
                     format("Requests to %s wait in the queue, not in the device", device.c_str()),
@@ -1533,7 +1643,7 @@ class Analysis {
                                    "the path to the target.";
         for (const auto& [operation, devices] : slow) {
             const auto severity_of = [](const Slow& entry) {
-                return entry.p99 >= 500.0 ? Severity::critical : Severity::warning;
+                return entry.p99 >= entry.critical_ms ? Severity::critical : Severity::warning;
             };
             if (devices.size() <= group_limit) {
                 for (const auto& entry : devices) {
@@ -2117,6 +2227,7 @@ class Analysis {
     std::map<std::string, std::vector<const Value*>> bpf_by_collector_;
     const Value* bpf_status_{};
     std::map<std::string, DeviceInfo> topology_;
+    std::map<std::string, std::pair<bool, bool>> device_kind_;  // rotational, stacked
     std::optional<double> window_start_;
     std::map<std::string, std::size_t> blocked_categories_;
     std::set<std::string> unhealthy_io_;

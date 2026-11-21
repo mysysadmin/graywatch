@@ -14,6 +14,12 @@ struct BlockDeviceSample {
     unsigned int major{};
     unsigned int minor{};
     std::string model;
+    // queue/rotational is 1 (spinning disk; md/dm report 1 when all their
+    // members do).
+    bool rotational{};
+    // No device/ link: a bio-based stacking driver (md, device-mapper, loop),
+    // whose busy time does not measure a hardware queue.
+    bool stacked{};
     std::uint64_t reads_completed{};
     std::uint64_t reads_merged{};
     std::uint64_t sectors_read{};
@@ -38,6 +44,8 @@ struct BlockDeviceInterval {
     unsigned int major{};
     unsigned int minor{};
     std::string model;
+    bool rotational{};
+    bool stacked{};
     double read_iops{};
     double write_iops{};
     double discard_iops{};

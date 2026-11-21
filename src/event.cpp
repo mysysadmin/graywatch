@@ -142,6 +142,8 @@ std::string to_json(const IoDeviceEvent& event) {
     output << ",\"major\":" << device.major << ",\"minor\":" << device.minor
            << ",\"model\":";
     json_string(output, device.model);
+    output << ",\"rotational\":" << (device.rotational ? "true" : "false")
+           << ",\"stacked\":" << (device.stacked ? "true" : "false");
     output << "},\"evidence\":{\"source\":\"sysfs_block_stat\""
            << ",\"assessment_reason\":";
     json_string(output, assessment.reason);

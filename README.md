@@ -413,7 +413,13 @@ The report contains:
 - per-device latency percentiles, memory reclaim/swap/OOM totals, TCP
   retransmissions, and InfiniBand port state. Block errors on pass-through
   commands (`drv_in`/`drv_out`, typically SMART queries) are info, errors on
-  unnamed operations a warning, and read/write/flush errors critical. Network
+  unnamed operations a warning, and read/write/flush errors critical. The
+  latency of pass-through commands is not judged. eBPF device service time
+  is slow from a p99 of 50 ms (critical from 500 ms) on solid-state devices
+  and from 300 ms (critical from 1 s) on spinning disks. On servers with more
+  than eight disks, devices whose episodes cover under 5% of their active
+  intervals, none degraded, are listed in one line instead of counted as
+  non-healthy. Network
   errors (TCP input errors, InfiniBand receive errors, link down) are called a
   likely contributor; congestion and retransmits alone are reported as
   context, since heavy transfers cause them;
@@ -642,13 +648,26 @@ failure:
 
 - `healthy`: active and responsive, even when the device is fully busy
 - `saturated`: at least 90% busy with average queue depth of at least one
-- `congested`: substantial queueing or average operation latency of 20 ms+
-- `degraded`: average operation latency of 100 ms+, an absolute guardrail
+  (four on a spinning disk)
+- `congested`: average queue depth of 4+ (16+ on a spinning disk) or average
+  operation latency of 20 ms+ (60 ms+ on a spinning disk)
+- `degraded`: average operation latency of 100 ms+ (250 ms+ on a spinning
+  disk), an absolute guardrail
 - `idle`: no completed operations in the interval
+
+A device is spinning when `queue/rotational` is 1. A spinning disk needs 5-15
+ms per random request and keeps up to 32 requests in its own queue, so SSD
+limits would call every loaded HDD congested. The `device` object carries
+`rotational` and `stacked`; `graywatch-report` takes them from `lsblk.json`
+for archives recorded before these fields existed and re-classifies the
+intervals.
 
 Every entry in `/sys/block` is reported, including loop and device-mapper
 devices. A stacked device and the disk beneath it both appear, and comparing
-them separates delay in the stacking layer from delay in the disk. The
+them separates delay in the stacking layer from delay in the disk. Stacked
+bio-based devices (md, device-mapper, loop: no `device/` link in sysfs) count
+busy time whenever a request is in flight below them, so they are never
+`saturated` and their queue depth is not used; only their latency is judged. The
 `psi_*` fields on I/O events are system-wide I/O pressure, repeated on every
 device for context; they are not per-device measurements.
 
